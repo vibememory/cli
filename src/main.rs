@@ -328,6 +328,14 @@ enum Command {
 enum VaultCommand {
     /// List secret names and metadata; values are never returned.
     List,
+    /// Create an expiring browser link that writes a secret directly into Vault.
+    Capture {
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u16).range(60..=3600))]
+        expires_in: u16,
+    },
     /// Inject selected secrets into one child process without printing them.
     Exec {
         #[arg(
@@ -1531,6 +1539,19 @@ fn run() -> Result<()> {
         )?,
         Command::Vault { command } => match command {
             VaultCommand::List => call(Method::GET, "/v1/vault", None)?,
+            VaultCommand::Capture {
+                name,
+                description,
+                expires_in,
+            } => call(
+                Method::POST,
+                "/v1/vault/captures",
+                Some(&json!({
+                    "name": name,
+                    "description": description,
+                    "expires_in": expires_in
+                })),
+            )?,
             VaultCommand::Exec { variables, command } => vault_exec(&variables, &command)?,
         },
         Command::Watch { .. }
@@ -1644,6 +1665,35 @@ mod tests {
         };
         assert_eq!(variables, ["TOKEN=github-token"]);
         assert_eq!(command, [OsString::from("tool"), OsString::from("--flag")]);
+    }
+
+    #[test]
+    fn parses_vault_capture_link_request() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "vault",
+            "capture",
+            "MOLTBOOK_API_KEY",
+            "--description",
+            "Rotated key",
+            "--expires-in",
+            "300",
+        ])
+        .unwrap();
+        let Command::Vault {
+            command:
+                VaultCommand::Capture {
+                    name,
+                    description,
+                    expires_in,
+                },
+        } = cli.command
+        else {
+            panic!("expected Vault capture");
+        };
+        assert_eq!(name, "MOLTBOOK_API_KEY");
+        assert_eq!(description, "Rotated key");
+        assert_eq!(expires_in, 300);
     }
 
     #[test]

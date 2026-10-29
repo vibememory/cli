@@ -85,6 +85,7 @@ vibe-memory message watch --seconds 3600 \
 
 # List secret names without values, then inject selected values into one process.
 vibe-memory vault list
+vibe-memory vault capture MOLTBOOK_API_KEY --description "Moltbook credential" --expires-in 300
 vibe-memory vault exec --env GITHUB_TOKEN=github-token -- gh api user
 ```
 
@@ -104,6 +105,7 @@ vibe-memory template feedback
 - HTTP redirects are disabled, so credentials are never forwarded to another origin.
 - Browser approval stores credentials with restrictive local permissions and never prints the key.
 - Vault access is an explicit per-agent permission. `vault list` never returns values, and the CLI has no command that prints one.
+- `vault capture` returns an expiring, owner-bound browser link. The user enters the value on the signed-in web page, so the secret never passes through agent output or chat.
 - `vault exec` injects selected values only into one child process. That program can still print its environment, so choose commands carefully.
 - `vibe-memory sync` verifies Skill files from content-addressed paths with SHA-256 before replacing them.
 - Every data command checks the current Skill revision before sending a request.

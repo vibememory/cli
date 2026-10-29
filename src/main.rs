@@ -68,6 +68,13 @@ enum Command {
         created_after: Option<String>,
         #[arg(long)]
         created_before: Option<String>,
+        #[arg(long, help = "Include records marked untrusted")]
+        include_untrusted: bool,
+        #[arg(
+            long,
+            help = "Include quarantined records; requires --include-untrusted"
+        )]
+        include_quarantined: bool,
     },
     /// Store an agent-authored durable memory.
     Remember {
@@ -82,6 +89,8 @@ enum Command {
         tags: Vec<String>,
         #[arg(long, default_value = "{}", help = "JSON object or @file")]
         metadata: String,
+        #[arg(long, default_value = "{}", help = "Provenance JSON object or @file")]
+        provenance: String,
     },
     /// Store an agent-resolved entity.
     Entity {
@@ -98,6 +107,8 @@ enum Command {
         tags: Vec<String>,
         #[arg(long, default_value = "{}", help = "JSON object or @file")]
         metadata: String,
+        #[arg(long, default_value = "{}", help = "Provenance JSON object or @file")]
+        provenance: String,
     },
     /// Store agent-prepared document metadata.
     Document {
@@ -116,6 +127,8 @@ enum Command {
         tags: Vec<String>,
         #[arg(long, default_value = "{}", help = "JSON object or @file")]
         metadata: String,
+        #[arg(long, default_value = "{}", help = "Provenance JSON object or @file")]
+        provenance: String,
     },
     /// Stream an opaque file as raw bytes.
     Upload { file: PathBuf },
@@ -152,6 +165,22 @@ enum Command {
     Forget { id: String },
     /// Update selected record fields from a prepared JSON object.
     Update { id: String, payload: PathBuf },
+    /// Review, trust, or quarantine a record with versioned evidence.
+    Security {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long, value_parser = ["trusted", "untrusted"])]
+        trust_level: Option<String>,
+        #[arg(long, value_parser = ["active", "quarantined"])]
+        state: Option<String>,
+        #[arg(long, value_parser = ["not_scanned", "safe", "suspicious", "malicious"])]
+        scan_verdict: Option<String>,
+        #[arg(long = "scan-evidence")]
+        scan_evidence: Vec<String>,
+        #[arg(long)]
+        reason: String,
+    },
     /// Move a record to recoverable trash.
     Archive {
         id: String,
@@ -175,6 +204,13 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         offset: u64,
     },
+    /// List records excluded from normal retrieval by quarantine policy.
+    Quarantine {
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
     /// Rewire duplicate relationships and archive duplicate records.
     Merge {
         canonical_id: String,
@@ -189,7 +225,16 @@ enum Command {
         reason: String,
     },
     /// Read a record's relationship graph.
-    Graph { id: String },
+    Graph {
+        id: String,
+        #[arg(long, help = "Include records marked untrusted")]
+        include_untrusted: bool,
+        #[arg(
+            long,
+            help = "Include quarantined records; requires --include-untrusted"
+        )]
+        include_quarantined: bool,
+    },
     /// List records.
     List {
         #[arg(long, value_parser = ["memory", "document", "entity", "file"])]
@@ -198,6 +243,13 @@ enum Command {
         limit: u16,
         #[arg(long, default_value_t = 0)]
         offset: u64,
+        #[arg(long, help = "Include records marked untrusted")]
+        include_untrusted: bool,
+        #[arg(
+            long,
+            help = "Include quarantined records; requires --include-untrusted"
+        )]
+        include_quarantined: bool,
     },
     /// Submit a feature request.
     Feedback {
@@ -981,7 +1033,8 @@ fn template(kind: &str) -> Value {
             "keywords": ["topic", "alias"],
             "source": "agent-session",
             "tags": [],
-            "metadata": {"evidence": "user-stated"}
+            "metadata": {"evidence": "user-stated"},
+            "provenance": {"source_type": "agent-authored"}
         }),
         "entity" => json!({
             "name": "Entity name",
@@ -990,7 +1043,8 @@ fn template(kind: &str) -> Value {
             "keywords": ["name", "alias"],
             "source": "agent-session",
             "tags": [],
-            "metadata": {}
+            "metadata": {},
+            "provenance": {"source_type": "agent-authored"}
         }),
         "document" => json!({
             "title": "document title",
@@ -999,7 +1053,8 @@ fn template(kind: &str) -> Value {
             "content": "optional opaque text",
             "source": "file or URL",
             "tags": [],
-            "metadata": {"summary": "agent-authored summary", "mime_type": "text/plain"}
+            "metadata": {"summary": "agent-authored summary", "mime_type": "text/plain"},
+            "provenance": {"source_type": "agent-authored"}
         }),
         _ => json!({
             "title": "Feature title",
@@ -1132,6 +1187,8 @@ fn run() -> Result<()> {
             metadata_filters,
             created_after,
             created_before,
+            include_untrusted,
+            include_quarantined,
         } => call(
             Method::POST,
             "/v1/search",
@@ -1146,7 +1203,9 @@ fn run() -> Result<()> {
                 "tags": tags,
                 "metadata_filters": json_object(&metadata_filters)?,
                 "created_after": created_after,
-                "created_before": created_before
+                "created_before": created_before,
+                "include_untrusted": include_untrusted,
+                "include_quarantined": include_quarantined
             })),
         )?,
         Command::Remember {
@@ -1156,6 +1215,7 @@ fn run() -> Result<()> {
             source,
             tags,
             metadata,
+            provenance,
         } => call(
             Method::POST,
             "/v1/memories",
@@ -1165,7 +1225,8 @@ fn run() -> Result<()> {
                 "source": source,
                 "tags": tags,
                 "keywords": keywords,
-                "metadata": json_object(&metadata)?
+                "metadata": json_object(&metadata)?,
+                "provenance": json_object(&provenance)?
             })),
         )?,
         Command::Entity {
@@ -1176,6 +1237,7 @@ fn run() -> Result<()> {
             source,
             tags,
             metadata,
+            provenance,
         } => {
             if entity_type.is_none() || keywords.is_empty() {
                 let path = PathBuf::from(&name);
@@ -1194,7 +1256,8 @@ fn run() -> Result<()> {
                         "source": source,
                         "tags": tags,
                         "keywords": keywords,
-                        "metadata": json_object(&metadata)?
+                        "metadata": json_object(&metadata)?,
+                        "provenance": json_object(&provenance)?
                     })),
                 )?
             }
@@ -1208,6 +1271,7 @@ fn run() -> Result<()> {
             source,
             tags,
             metadata,
+            provenance,
         } => {
             let content = if let Some(path) = content_file {
                 fs::read_to_string(path)?
@@ -1224,7 +1288,8 @@ fn run() -> Result<()> {
                     "source": source,
                     "tags": tags,
                     "keywords": keywords,
-                    "metadata": json_object(&metadata)?
+                    "metadata": json_object(&metadata)?,
+                    "provenance": json_object(&provenance)?
                 })),
             )?
         }
@@ -1364,8 +1429,12 @@ fn run() -> Result<()> {
             kind,
             limit,
             offset,
+            include_untrusted,
+            include_quarantined,
         } => {
-            let mut endpoint = format!("/v1/records?limit={limit}&offset={offset}");
+            let mut endpoint = format!(
+                "/v1/records?limit={limit}&offset={offset}&include_untrusted={include_untrusted}&include_quarantined={include_quarantined}"
+            );
             if let Some(kind) = kind {
                 endpoint.push_str("&kind=");
                 endpoint.push_str(&quote(&kind));
@@ -1380,6 +1449,30 @@ fn run() -> Result<()> {
             Method::PATCH,
             &format!("/v1/records/{}", quote(&id)),
             Some(&file_json(&payload)?),
+        )?,
+        Command::Security {
+            id,
+            version,
+            trust_level,
+            state,
+            scan_verdict,
+            scan_evidence,
+            reason,
+        } => call(
+            Method::PATCH,
+            &format!("/v1/records/{}/security", quote(&id)),
+            Some(&json!({
+                "expected_version": version,
+                "trust_level": trust_level,
+                "state": state,
+                "scan_verdict": scan_verdict,
+                "scan_evidence": if scan_evidence.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::to_value(scan_evidence)?
+                },
+                "reason": reason
+            })),
         )?,
         Command::Archive {
             id,
@@ -1404,6 +1497,11 @@ fn run() -> Result<()> {
             &format!("/v1/trash?limit={limit}&offset={offset}"),
             None,
         )?,
+        Command::Quarantine { limit, offset } => call(
+            Method::GET,
+            &format!("/v1/quarantine?limit={limit}&offset={offset}"),
+            None,
+        )?,
         Command::Merge {
             canonical_id,
             duplicate_ids,
@@ -1419,7 +1517,18 @@ fn run() -> Result<()> {
                 "reason": reason
             })),
         )?,
-        Command::Graph { id } => call(Method::GET, &format!("/v1/graph/{}", quote(&id)), None)?,
+        Command::Graph {
+            id,
+            include_untrusted,
+            include_quarantined,
+        } => call(
+            Method::GET,
+            &format!(
+                "/v1/graph/{}?include_untrusted={include_untrusted}&include_quarantined={include_quarantined}",
+                quote(&id)
+            ),
+            None,
+        )?,
         Command::Vault { command } => match command {
             VaultCommand::List => call(Method::GET, "/v1/vault", None)?,
             VaultCommand::Exec { variables, command } => vault_exec(&variables, &command)?,
@@ -1534,6 +1643,8 @@ mod tests {
             "archived",
             "--min-score",
             "0.6",
+            "--include-untrusted",
+            "--include-quarantined",
         ])
         .unwrap();
         let Command::Recall {
@@ -1541,6 +1652,8 @@ mod tests {
             must_keywords,
             exclude_keywords,
             min_score,
+            include_untrusted,
+            include_quarantined,
             ..
         } = cli.command
         else {
@@ -1550,6 +1663,48 @@ mod tests {
         assert_eq!(must_keywords, ["active"]);
         assert_eq!(exclude_keywords, ["archived"]);
         assert_eq!(min_score, 0.6);
+        assert!(include_untrusted);
+        assert!(include_quarantined);
+    }
+
+    #[test]
+    fn parses_record_security_review() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "security",
+            "record-1",
+            "--version",
+            "2",
+            "--trust-level",
+            "trusted",
+            "--state",
+            "active",
+            "--scan-verdict",
+            "safe",
+            "--scan-evidence",
+            "reviewed as inert text",
+            "--reason",
+            "explicit review",
+        ])
+        .unwrap();
+        let Command::Security {
+            id,
+            version,
+            trust_level,
+            state,
+            scan_verdict,
+            scan_evidence,
+            ..
+        } = cli.command
+        else {
+            panic!("expected security review");
+        };
+        assert_eq!(id, "record-1");
+        assert_eq!(version, 2);
+        assert_eq!(trust_level.as_deref(), Some("trusted"));
+        assert_eq!(state.as_deref(), Some("active"));
+        assert_eq!(scan_verdict.as_deref(), Some("safe"));
+        assert_eq!(scan_evidence, ["reviewed as inert text"]);
     }
 
     #[test]

@@ -46,6 +46,13 @@ vibe-memory recall project-name --match-mode hybrid --must-keyword active \
 vibe-memory remember "Use PostgreSQL for production" \
   --kind fact --keyword PostgreSQL --keyword production
 
+# Mark web or imported text as external; it is quarantined by default.
+vibe-memory remember "agent-prepared external summary" --keyword source \
+  --provenance '{"source_type":"external","origin_url":"https://example.com","content_type":"text/html"}'
+vibe-memory quarantine
+vibe-memory security RECORD_ID --version 1 --trust-level trusted --state active \
+  --scan-verdict safe --scan-evidence "reviewed as inert data" --reason "explicit review"
+
 # Store a resolved entity and relationship.
 vibe-memory entity "Vibe Memory" --type Project --keyword vibememory
 vibe-memory relate SOURCE_ID TARGET_ID \

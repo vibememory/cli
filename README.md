@@ -2,7 +2,7 @@
 
 A native Rust client for the [Vibe Memory](https://github.com/vibememory/vibememory) agent Skill.
 
-It wraps browser authentication, memory and entity storage, keyword search, relationship management, raw byte-stream file transfer, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
+It wraps browser authentication, memory and entity storage, keyword search, relationship management, raw byte-stream file transfer, encrypted Vault execution, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
 
 The CLI does not call an LLM or analyze your data. Entity resolution, relationship inference, file analysis, and keyword extraction remain the connected agent's responsibility.
 
@@ -22,17 +22,17 @@ To use it inside a filesystem-based agent Skill, put the downloaded binary at `b
 ## Connect in the browser
 
 ```sh
-vibe-memory login --name "My agent"
+vibe-memory login --name "My agent" --vault-access
 vibe-memory status
 ```
 
 For a remote agent, keep the command running and send its generated approval link to the user:
 
 ```sh
-vibe-memory login --no-browser --name "Remote coding agent"
+vibe-memory login --no-browser --name "Remote coding agent" --vault-access
 ```
 
-The user signs in and approves the named agent on the web. The CLI saves the resulting key locally without displaying it. Connect to a self-hosted deployment with `--url https://memory.example.com`.
+The user signs in and approves the named agent on the web. Vault use is shown as a separate sensitive permission when requested. The CLI saves the resulting key locally without displaying it. Connect to a self-hosted deployment with `--url https://memory.example.com`.
 
 ## Common commands
 
@@ -54,6 +54,10 @@ vibe-memory upload ./document.pdf
 
 # Receive compact live change events.
 vibe-memory watch --seconds 3600 --cursor-file .private/vibe-memory.cursor
+
+# List secret names without values, then inject selected values into one process.
+vibe-memory vault list
+vibe-memory vault exec --env GITHUB_TOKEN=github-token -- gh api user
 ```
 
 Output is compact JSON by default. Add global `--pretty` for human inspection. Load details only when needed:
@@ -71,6 +75,8 @@ vibe-memory template feedback
 - Remote service origins must use HTTPS.
 - HTTP redirects are disabled, so credentials are never forwarded to another origin.
 - Browser approval stores credentials with restrictive local permissions and never prints the key.
+- Vault access is an explicit per-agent permission. `vault list` never returns values, and the CLI has no command that prints one.
+- `vault exec` injects selected values only into one child process. That program can still print its environment, so choose commands carefully.
 - `vibe-memory sync` verifies Skill files from content-addressed paths with SHA-256 before replacing them.
 - Every data command checks the current Skill revision before sending a request.
 - Release workflows publish native binaries and a `SHA256SUMS` file.

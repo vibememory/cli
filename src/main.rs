@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,7 @@ const MAX_DISTRIBUTION_BYTES: u64 = 1024 * 1024;
 #[command(
     name = "vibe-memory",
     version,
-    about = "Native CLI for agent-authored memory, files, graph, feedback, and live events"
+    about = "Native CLI for agent-authored memory, files, graph, Vault, feedback, and live events"
 )]
 struct Cli {
     #[arg(long, global = true, help = "Indent JSON output (default is compact)")]
@@ -180,6 +181,11 @@ enum Command {
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
+    /// Use encrypted server-side secrets without printing their values.
+    Vault {
+        #[command(subcommand)]
+        command: VaultCommand,
+    },
     /// Refresh installed Skill instructions.
     Sync,
     /// Connect through browser approval.
@@ -190,6 +196,8 @@ enum Command {
         name: String,
         #[arg(long)]
         no_browser: bool,
+        #[arg(long, help = "Request explicit permission to use Vault secrets")]
+        vault_access: bool,
     },
     /// Fallback: save an existing API key interactively.
     Configure,
@@ -197,6 +205,24 @@ enum Command {
     Status,
     /// Remove locally saved credentials.
     Logout,
+}
+
+#[derive(Subcommand, Debug)]
+enum VaultCommand {
+    /// List secret names and metadata; values are never returned.
+    List,
+    /// Inject selected secrets into one child process without printing them.
+    Exec {
+        #[arg(
+            long = "env",
+            value_name = "VARIABLE=VAULT_NAME",
+            required = true,
+            help = "Map a child-process environment variable to a Vault entry"
+        )]
+        variables: Vec<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<OsString>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -417,9 +443,13 @@ fn post_public<T: for<'de> Deserialize<'de>>(base: &str, path: &str, body: &Valu
     response.json().context("Login returned invalid JSON")
 }
 
-fn browser_login(base: &str, name: &str, no_browser: bool) -> Result<()> {
+fn browser_login(base: &str, name: &str, no_browser: bool, vault_access: bool) -> Result<()> {
     let base = validate_origin(base)?;
-    let pending: DeviceStart = post_public(&base, "/auth/device/start", &json!({"name": name}))?;
+    let pending: DeviceStart = post_public(
+        &base,
+        "/auth/device/start",
+        &json!({"name": name, "vault_access": vault_access}),
+    )?;
     if pending.user_code.len() != 10
         || !pending
             .user_code
@@ -668,6 +698,57 @@ fn quote(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
+fn vault_mapping(value: &str) -> Result<(&str, &str)> {
+    let (variable, name) = value
+        .split_once('=')
+        .context("Use --env VARIABLE=VAULT_NAME")?;
+    let valid_variable = variable.chars().enumerate().all(|(index, character)| {
+        character == '_'
+            || character.is_ascii_alphabetic()
+            || index > 0 && character.is_ascii_digit()
+    });
+    let valid_name = !name.is_empty()
+        && name.len() <= 100
+        && name.chars().enumerate().all(|(index, character)| {
+            character.is_ascii_alphabetic()
+                || index > 0 && (character.is_ascii_digit() || matches!(character, '_' | '.' | '-'))
+        });
+    if variable.is_empty() || !valid_variable || !valid_name {
+        bail!("Use --env VARIABLE=VAULT_NAME with valid identifiers");
+    }
+    Ok((variable, name))
+}
+
+fn vault_exec(variables: &[String], command: &[OsString]) -> Result<Value> {
+    if variables.len() > 32 {
+        bail!("At most 32 Vault entries can be injected into one process");
+    }
+    let executable = command.first().context("Provide a command after --")?;
+    let mut process = ProcessCommand::new(executable);
+    process.args(&command[1..]);
+    let mut seen = Vec::new();
+    for mapping in variables {
+        let (variable, name) = vault_mapping(mapping)?;
+        if seen.iter().any(|existing| existing == variable) {
+            bail!("Duplicate child-process environment variable: {variable}");
+        }
+        let response = call(Method::GET, &format!("/v1/vault/{}", quote(name)), None)?;
+        let value = response
+            .get("value")
+            .and_then(Value::as_str)
+            .context("Vault returned an invalid secret value")?;
+        process.env(variable, value);
+        seen.push(variable.to_owned());
+    }
+    let status = process
+        .status()
+        .context("Cannot start Vault child process")?;
+    if !status.success() {
+        bail!("Vault child process exited with {status}");
+    }
+    Ok(json!({"executed": true, "exit_code": status.code()}))
+}
+
 fn save_cursor(path: &Path, value: u64) -> Result<()> {
     atomic_write(path, value.to_string().as_bytes(), 0o600)
 }
@@ -844,9 +925,10 @@ fn run() -> Result<()> {
             url,
             name,
             no_browser,
+            vault_access,
         } => {
             let base = url.clone().unwrap_or(connection()?.base);
-            return browser_login(&base, name, *no_browser);
+            return browser_login(&base, name, *no_browser, *vault_access);
         }
         Command::Configure => return configure(),
         Command::Status => {
@@ -855,7 +937,8 @@ fn run() -> Result<()> {
                 &json!({
                     "connected": true,
                     "url": connection()?.base,
-                    "user_id": me.get("user_id").cloned().unwrap_or(Value::Null)
+                    "user_id": me.get("user_id").cloned().unwrap_or(Value::Null),
+                    "vault_access": me.get("vault_access").cloned().unwrap_or(Value::Bool(false))
                 }),
                 cli.pretty,
             );
@@ -1062,6 +1145,10 @@ fn run() -> Result<()> {
             call(Method::DELETE, &format!("/v1/records/{}", quote(&id)), None)?
         }
         Command::Graph { id } => call(Method::GET, &format!("/v1/graph/{}", quote(&id)), None)?,
+        Command::Vault { command } => match command {
+            VaultCommand::List => call(Method::GET, "/v1/vault", None)?,
+            VaultCommand::Exec { variables, command } => vault_exec(&variables, &command)?,
+        },
         Command::Watch { .. }
         | Command::Sync
         | Command::Login { .. }
@@ -1116,6 +1203,46 @@ mod tests {
     fn templates_are_objects() {
         assert_eq!(template("entity")["entity_type"], "Person");
         assert!(template("document")["metadata"].is_object());
+    }
+
+    #[test]
+    fn validates_vault_environment_mappings() {
+        assert_eq!(
+            vault_mapping("GITHUB_TOKEN=github-token").unwrap(),
+            ("GITHUB_TOKEN", "github-token")
+        );
+        for invalid in [
+            "missing-equals",
+            "9TOKEN=github",
+            "TOKEN=9github",
+            "TOKEN=bad/name",
+            "TOKEN=",
+        ] {
+            assert!(vault_mapping(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn parses_vault_exec_after_separator() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "vault",
+            "exec",
+            "--env",
+            "TOKEN=github-token",
+            "--",
+            "tool",
+            "--flag",
+        ])
+        .unwrap();
+        let Command::Vault {
+            command: VaultCommand::Exec { variables, command },
+        } = cli.command
+        else {
+            panic!("expected Vault exec");
+        };
+        assert_eq!(variables, ["TOKEN=github-token"]);
+        assert_eq!(command, [OsString::from("tool"), OsString::from("--flag")]);
     }
 
     #[test]

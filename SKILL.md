@@ -5,7 +5,7 @@ description: "Use Vibe Memory proactively for continuity across tasks and agents
 
 Vibe Memory is a data service and keyword index. You perform all reasoning, entity resolution, relationship inference, file analysis and keyword extraction. The service never calls an LLM, analyzes files, chunks content or builds RAG context.
 
-Use the bundled `./bin/vibe-memory` CLI. If `bin/vibe-memory` is missing in an older installation, run `python3 scripts/memory.py --help` once to download its verified current version. On Windows or when execute permission is unavailable, run `python3 bin/vibe-memory` (`py` is also acceptable on Windows). Do not call the REST API directly or load the CLI source into context. Ask the CLI for details only when needed:
+Use the native Rust `vibe-memory` CLI (`./bin/vibe-memory` inside the complete Skill archive and `bin\vibe-memory.exe` on Windows). If it is missing, install the platform binary from `https://github.com/vibememory/cli/releases/latest`; older archives may include a compatibility bootstrap at `scripts/memory.py`. Do not call the REST API directly or load CLI source into context. Ask the CLI for details only when needed:
 
 ```sh
 ./bin/vibe-memory --help
@@ -54,4 +54,4 @@ Analyze files with your own tools. `upload` sends opaque bytes without parsing o
 
 `login` uses a five-minute browser approval flow and stores the resulting key in the user's local Vibe Memory config. Never print or read that credential into context. `logout` removes local config but does not revoke the server key; revoke unwanted connections in the web console. Self-hosted users pass `login --url https://THEIR_SERVICE`.
 
-The compatibility command `python3 scripts/memory.py ...` downloads and verifies the current CLI, then forwards all arguments. Prefer `./bin/vibe-memory` after installation. Both the launcher and CLI verify SHA-256 content from the configured service; skill updates never contain account data or credentials.
+The main Vibe Memory Skill archive may include a compatibility bootstrap that downloads a verified native binary for older installations. Prefer the Rust CLI directly after installation. The CLI verifies SHA-256 Skill content from the configured service; updates never contain account data or credentials.

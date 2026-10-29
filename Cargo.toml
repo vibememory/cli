@@ -1,0 +1,33 @@
+[package]
+name = "vibe-memory-cli"
+version = "3.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Token-efficient native CLI for Vibe Memory agents"
+license = "MIT"
+repository = "https://github.com/vibememory/cli"
+homepage = "https://vibememory.io"
+keywords = ["agents", "memory", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "vibe-memory"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+percent-encoding = "2"
+reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls-webpki-roots"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+url = "2"
+webbrowser = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

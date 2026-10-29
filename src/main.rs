@@ -572,7 +572,7 @@ where
 }
 
 fn configured_ca_bundle() -> Option<(String, PathBuf)> {
-    configured_ca_bundle_with(env::var_os)
+    configured_ca_bundle_with(|variable| env::var_os(variable))
 }
 
 fn http_client_with_ca_bundle(

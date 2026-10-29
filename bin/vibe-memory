@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""Vibe Memory CLI: agent-authored memory, files, graph, feedback, and live events."""
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import webbrowser
+from pathlib import Path
+from urllib.parse import quote, urlsplit
+
+ROOT = Path(__file__).resolve().parents[1]
+USER_AGENT = "VibeMemoryCLI/2.0"
+
+
+def config_path():
+    base = os.environ.get("APPDATA") if os.name == "nt" else os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / "vibe-memory" / "client.json"
+
+
+def validate_origin(base):
+    base = base.strip().rstrip("/")
+    parsed = urlsplit(base)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path
+    ):
+        raise ValueError("Use a service origin such as https://vibememory.io")
+    if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("HTTPS is required except on localhost")
+    return base
+
+
+def read_config():
+    path = config_path()
+    if not path.exists():
+        return {}
+    if os.name != "nt" and path.stat().st_mode & 0o077:
+        raise ValueError("Client config permissions are too broad; run chmod 600 on " + str(path))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Invalid client configuration")
+    return data
+
+
+def connection():
+    saved = read_config()
+    base = validate_origin(
+        os.environ.get("MEMORY_URL") or saved.get("url") or "https://vibememory.io"
+    )
+    key = os.environ.get("MEMORY_API_KEY")
+    if key is None:
+        key = saved.get("api_key", "") if saved.get("url") == base else ""
+    return base, key
+
+
+def save_credentials(base, key):
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, delete=False
+    ) as temporary:
+        json.dump({"url": base, "api_key": key}, temporary)
+        temporary_path = Path(temporary.name)
+    try:
+        temporary_path.chmod(0o600)
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def opener():
+    return urllib.request.build_opener(NoRedirect)
+
+
+def browser_login(base, name, no_browser=False):
+    base = validate_origin(base)
+
+    def post(path, payload):
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        )
+        try:
+            with opener().open(request, timeout=20) as response:
+                return json.loads(response.read(16384))
+        except urllib.error.HTTPError as error:
+            messages = {
+                403: "Connection denied",
+                410: "Connection expired; run login again",
+                422: "Cannot create a key; check the console key limit",
+                429: "Too many requests; wait before retrying",
+            }
+            raise RuntimeError(
+                messages.get(error.code, f"Login returned HTTP {error.code}")
+            ) from None
+
+    pending = post("/auth/device/start", {"name": name})
+    code = pending["user_code"]
+    if len(code) != 10 or any(char not in "ABCDEF0123456789" for char in code):
+        raise ValueError("Invalid verification code")
+    url = base + "/connect?code=" + code
+    print("Approve this agent in your browser: " + url, flush=True)
+    print("Confirm code: " + code + " (expires in 5 minutes)", flush=True)
+    if not no_browser:
+        webbrowser.open(url)
+    deadline = time.monotonic() + min(300, pending["expires_in"])
+    interval = max(3, min(10, pending.get("interval", 3)))
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        result = post("/auth/device/poll", {"device_code": pending["device_code"]})
+        if result["state"] == "connected":
+            call("/v1/me", credentials=(base, result["key"]))
+            save_credentials(base, result["key"])
+            print("Connected. Credentials saved locally; no API key was displayed.", flush=True)
+            return
+        if result["state"] != "pending":
+            raise RuntimeError("Unexpected login state")
+    raise RuntimeError("Connection expired; run login again")
+
+
+def configure():
+    if not sys.stdin.isatty() or not sys.stderr.isatty():
+        raise ValueError("Run configure in an interactive terminal")
+    saved = read_config()
+    default = saved.get("url") or "https://vibememory.io"
+    base = validate_origin(input(f"Server URL [{default}]: ").strip() or default)
+    print("Create an agent key at " + base + "/console; paste it below (hidden).")
+    key = getpass.getpass("API key: ").strip()
+    if not key or any(char.isspace() for char in key):
+        raise ValueError("Enter a nonempty API key without whitespace")
+    call("/v1/me", credentials=(base, key))
+    save_credentials(base, key)
+    print("Connected. Credentials saved locally to " + str(config_path()))
+
+
+def sync_skill():
+    """Update the instructions, compatibility launcher, and this CLI."""
+    base, _ = connection()
+
+    def download(path, limit):
+        request = urllib.request.Request(
+            base + path, headers={"Cache-Control": "no-cache", "User-Agent": USER_AGENT}
+        )
+        with opener().open(request, timeout=15) as response:
+            data = response.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("Skill distribution exceeds size limit")
+        return data
+
+    manifest = json.loads(download("/skills/vibe-memory/manifest.json", 16384))
+    allowed = {"SKILL.md", "scripts/memory.py"}
+    files = manifest.get("files", {})
+    if manifest.get("schema_version") != 1 or set(files) != allowed:
+        raise ValueError("Unsupported skill manifest")
+    revision = hashlib.sha256(
+        json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if manifest.get("revision") != revision:
+        raise ValueError("Invalid skill revision")
+    cli = manifest.get("cli", {})
+    cli_digest = cli.get("sha256", "")
+    cli_url = cli.get("url", "")
+    if (
+        cli.get("path") != "bin/vibe-memory"
+        or len(cli_digest) != 64
+        or any(char not in "0123456789abcdef" for char in cli_digest)
+        or cli_url != "/skills/vibe-memory/cli/" + cli_digest + "/vibe-memory"
+    ):
+        raise ValueError("Unsupported CLI manifest")
+    pending = []
+    for name in sorted(allowed):
+        target = ROOT / name
+        if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == files[name]:
+            continue
+        data = download("/skills/vibe-memory/releases/" + revision + "/" + name, 1048576)
+        if hashlib.sha256(data).hexdigest() != files[name]:
+            raise ValueError("Skill checksum mismatch; no files updated")
+        pending.append((target, data, 0o644))
+    cli_target = ROOT / "bin" / "vibe-memory"
+    if (
+        not cli_target.is_file()
+        or hashlib.sha256(cli_target.read_bytes()).hexdigest() != cli_digest
+    ):
+        data = download(cli_url, 1048576)
+        if hashlib.sha256(data).hexdigest() != cli_digest:
+            raise ValueError("CLI checksum mismatch; no files updated")
+        pending.append((cli_target, data, 0o755))
+    for target, data, mode in pending:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as temporary:
+            temporary.write(data)
+            temporary_path = Path(temporary.name)
+        try:
+            temporary_path.chmod(mode)
+            temporary_path.replace(target)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+    return {
+        "revision": revision,
+        "updated": bool(pending),
+        "instruction": "Read SKILL.md again before continuing" if pending else "Skill is current",
+    }
+
+
+def call(path, method="GET", body=None, binary=None, credentials=None):
+    base, key = credentials if credentials is not None else connection()
+    base = validate_origin(base)
+    if not key:
+        raise ValueError("Run login, configure, or set MEMORY_API_KEY")
+    headers = {
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    if binary is not None:
+        headers.update(
+            {
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(os.fstat(binary.fileno()).st_size),
+            }
+        )
+    request = urllib.request.Request(
+        base + path,
+        method=method,
+        headers=headers,
+        data=binary
+        if binary is not None
+        else (None if body is None else json.dumps(body, ensure_ascii=False).encode()),
+    )
+    try:
+        response = opener().open(request, timeout=180)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"API returned HTTP {error.code}") from None
+    with response:
+        data = response.read()
+        return json.loads(data) if data else {"deleted": True}
+
+
+def download_file(record_id, output):
+    base, key = connection()
+    if not key:
+        raise ValueError("Run login, configure, or set MEMORY_API_KEY")
+    request = urllib.request.Request(
+        base + "/v1/files/" + quote(record_id, safe=""),
+        headers={"Authorization": "Bearer " + key, "User-Agent": USER_AGENT},
+    )
+    try:
+        with opener().open(request, timeout=180) as response:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with output.open("wb") as destination:
+                while chunk := response.read(1024 * 1024):
+                    destination.write(chunk)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"API returned HTTP {error.code}") from None
+    return {"downloaded": True, "path": str(output), "size_bytes": output.stat().st_size}
+
+
+def json_value(value):
+    if not value:
+        return {}
+    text = Path(value[1:]).read_text(encoding="utf-8") if value.startswith("@") else value
+    result = json.loads(text)
+    if not isinstance(result, dict):
+        raise ValueError("Metadata must be a JSON object")
+    return result
+
+
+def file_json(path):
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("Payload must be a JSON object")
+    return value
+
+
+def watch_events(seconds=60, after=0, cursor_file=None):
+    base, key = connection()
+    if not key:
+        raise ValueError("Run login, configure, or set MEMORY_API_KEY")
+    if cursor_file and cursor_file.exists():
+        after = int(cursor_file.read_text().strip())
+    if after < 0 or after > 9223372036854775807:
+        raise ValueError("Invalid event cursor")
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        duration = max(1, min(25, int(deadline - time.monotonic())))
+        request = urllib.request.Request(
+            base + "/v1/events?seconds=" + str(duration),
+            headers={
+                "Authorization": "Bearer " + key,
+                "Accept": "text/event-stream",
+                "Last-Event-ID": str(after),
+                "User-Agent": USER_AGENT,
+            },
+        )
+        try:
+            with opener().open(request, timeout=duration + 15) as response:
+                if response.headers.get_content_type() != "text/event-stream":
+                    raise ValueError("Expected an SSE event stream")
+                event = {}
+                for raw in response:
+                    line = raw.decode("utf-8").rstrip("\r\n")
+                    if not line:
+                        if {"id", "event", "data"} <= event.keys():
+                            event_id = int(event["id"])
+                            if event_id > after:
+                                yield {
+                                    "id": event_id,
+                                    "event": event["event"],
+                                    "data": json.loads(event["data"]),
+                                }
+                                after = event_id
+                                if cursor_file:
+                                    cursor_file.parent.mkdir(parents=True, exist_ok=True)
+                                    with tempfile.NamedTemporaryFile(
+                                        mode="w", dir=cursor_file.parent, delete=False
+                                    ) as saved:
+                                        saved.write(str(after))
+                                        saved_path = Path(saved.name)
+                                    saved_path.replace(cursor_file)
+                        event = {}
+                    elif line.startswith(("id:", "event:", "data:")):
+                        name, value = line.split(":", 1)
+                        event[name] = value.lstrip(" ")
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"Event stream returned HTTP {error.code}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            print(
+                f"Vibe Memory stream interrupted ({type(error).__name__}); reconnecting",
+                file=sys.stderr,
+            )
+        if time.monotonic() < deadline:
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+
+
+def emit(value, pretty=False):
+    print(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            separators=None if pretty else (",", ":"),
+        )
+    )
+
+
+def templates(kind):
+    values = {
+        "memory": {
+            "content": "durable fact or preference",
+            "kind": "fact",
+            "keywords": ["topic", "alias"],
+            "source": "agent-session",
+            "tags": [],
+            "metadata": {"evidence": "user-stated"},
+        },
+        "entity": {
+            "name": "Entity name",
+            "entity_type": "Person",
+            "description": "verified description",
+            "keywords": ["name", "alias"],
+            "source": "agent-session",
+            "tags": [],
+            "metadata": {},
+        },
+        "document": {
+            "title": "document title",
+            "keywords": ["topic", "project"],
+            "file_id": "optional uploaded file ID",
+            "content": "optional opaque text",
+            "source": "file or URL",
+            "tags": [],
+            "metadata": {"summary": "agent-authored summary", "mime_type": "text/plain"},
+        },
+        "feedback": {
+            "title": "Feature title",
+            "description": "Concrete missing capability",
+            "agent_name": "agent name",
+            "use_case": "Why it matters",
+            "priority": "medium",
+            "source": "agent-session",
+            "client_request_id": "stable-retry-id",
+        },
+    }
+    return values[kind]
+
+
+def normalize_legacy_arguments(arguments):
+    """Translate previously distributed commands without exposing them in help."""
+    values = list(arguments)
+    index = 1 if values[:1] == ["--pretty"] else 0
+    if index >= len(values):
+        return values
+    replacements = {
+        "ingest": ["from-json", "document"],
+        "entity-json": ["from-json", "entity"],
+        "request-feature": ["from-json", "feedback"],
+        "feature-request": ["feedback-get"],
+        "feature-requests": ["feedback-list"],
+    }
+    replacement = replacements.get(values[index])
+    return values[:index] + replacement + values[index + 1 :] if replacement else values
+
+
+def parser():
+    root = argparse.ArgumentParser(description=__doc__)
+    root.add_argument(
+        "--pretty", action="store_true", help="Indent JSON output (default is compact)"
+    )
+    commands = root.add_subparsers(dest="command", required=True)
+
+    recall = commands.add_parser("recall", help="Search agent-extracted keywords")
+    recall.add_argument("keywords", nargs="+")
+    recall.add_argument("--limit", type=int, choices=range(1, 101), default=8, metavar="1..100")
+    recall.add_argument(
+        "--scope", choices=["all", "memories", "documents", "entities"], default="all"
+    )
+
+    remember = commands.add_parser("remember", help="Store an agent-authored durable memory")
+    remember.add_argument("content")
+    remember.add_argument("-k", "--keyword", action="append", required=True)
+    remember.add_argument(
+        "--kind", choices=["fact", "preference", "event", "instruction"], default="fact"
+    )
+    remember.add_argument("--source", default="")
+    remember.add_argument("--tag", action="append", default=[])
+    remember.add_argument("--metadata", default="{}", help="JSON object or @file")
+
+    entity = commands.add_parser("entity", help="Store an agent-resolved entity")
+    entity.add_argument("name")
+    entity.add_argument("--type", dest="entity_type")
+    entity.add_argument("-k", "--keyword", action="append")
+    entity.add_argument("--description", default="")
+    entity.add_argument("--source", default="")
+    entity.add_argument("--tag", action="append", default=[])
+    entity.add_argument("--metadata", default="{}", help="JSON object or @file")
+
+    document = commands.add_parser("document", help="Store agent-prepared document metadata")
+    document.add_argument("title")
+    document.add_argument("-k", "--keyword", action="append", required=True)
+    document.add_argument("--file-id", default="")
+    document.add_argument("--content", default="")
+    document.add_argument("--content-file", type=Path)
+    document.add_argument("--source", default="")
+    document.add_argument("--tag", action="append", default=[])
+    document.add_argument("--metadata", default="{}", help="JSON object or @file")
+
+    upload = commands.add_parser("upload", help="Stream an opaque file as raw bytes")
+    upload.add_argument("file", type=Path)
+    download = commands.add_parser("download", help="Download an original file")
+    download.add_argument("id")
+    download.add_argument("output", type=Path)
+
+    relate = commands.add_parser("relate", help="Store an agent-inferred relationship")
+    relate.add_argument("source_id")
+    relate.add_argument("target_id")
+    relate.add_argument("--relation", required=True)
+    relate.add_argument("--reason", required=True)
+    relation_status = commands.add_parser(
+        "relation-status", help="Retract or restore a relationship"
+    )
+    relation_status.add_argument("id")
+    relation_status.add_argument("--status", choices=["active", "retracted"], required=True)
+    relation_status.add_argument("--reason", required=True)
+    relation_status.add_argument("--version", type=int, required=True)
+
+    reindex = commands.add_parser("keywords", help="Replace a record keyword index")
+    reindex.add_argument("id")
+    reindex.add_argument("keywords", nargs="+")
+    for name in ("get", "forget", "graph"):
+        command = commands.add_parser(name)
+        command.add_argument("id")
+    listing = commands.add_parser("list", help="List records")
+    listing.add_argument("--kind", choices=["memory", "document", "entity", "file"])
+    listing.add_argument("--limit", type=int, choices=range(1, 101), default=50, metavar="1..100")
+    listing.add_argument("--offset", type=int, default=0)
+
+    feedback = commands.add_parser("feedback", help="Submit a feature request")
+    feedback.add_argument("title")
+    feedback.add_argument("--description", required=True)
+    feedback.add_argument("--agent-name", required=True)
+    feedback.add_argument("--use-case", default="")
+    feedback.add_argument("--priority", choices=["low", "medium", "high"], default="medium")
+    feedback.add_argument("--source", default="")
+    feedback.add_argument("--retry-id", default="", dest="client_request_id")
+    commands.add_parser("feedback-list", help="List submitted feature requests")
+    feedback_get = commands.add_parser("feedback-get", help="Read a feature request")
+    feedback_get.add_argument("id")
+
+    from_json = commands.add_parser("from-json", help="Advanced: submit a prepared JSON object")
+    from_json.add_argument("type", choices=["memory", "entity", "document", "feedback"])
+    from_json.add_argument("payload", type=Path)
+    template = commands.add_parser("template", help="Print a compact payload template")
+    template.add_argument("type", choices=["memory", "entity", "document", "feedback"])
+
+    watch = commands.add_parser("watch", help="Print live changes as compact JSON lines")
+    watch.add_argument("--seconds", type=int, choices=range(1, 3601), default=60, metavar="1..3600")
+    watch.add_argument("--after", type=int, default=0)
+    watch.add_argument("--cursor-file", type=Path)
+    commands.add_parser("sync", help="Refresh skill instructions")
+    login = commands.add_parser("login", help="Connect through browser approval")
+    login.add_argument("--url")
+    login.add_argument("--name", default="Connected agent")
+    login.add_argument("--no-browser", action="store_true")
+    commands.add_parser("configure", help="Fallback: save an existing API key interactively")
+    commands.add_parser("status", help="Verify authentication without printing credentials")
+    commands.add_parser("logout", help="Remove locally saved credentials")
+
+    return root
+
+
+def main():
+    args = parser().parse_args(normalize_legacy_arguments(sys.argv[1:]))
+    if args.command == "login":
+        browser_login(args.url or connection()[0], args.name, args.no_browser)
+        return
+    if args.command == "configure":
+        configure()
+        return
+    if args.command == "status":
+        me = call("/v1/me")
+        emit({"connected": True, "url": connection()[0], "user_id": me["user_id"]}, args.pretty)
+        return
+    if args.command == "logout":
+        config_path().unlink(missing_ok=True)
+        emit({"local_credentials_removed": True}, args.pretty)
+        return
+    if args.command == "template":
+        emit(templates(args.type), args.pretty)
+        return
+
+    update = sync_skill()
+    if args.command == "sync":
+        emit(update, args.pretty)
+        return
+    if update["updated"]:
+        raise RuntimeError(
+            "Skill updated. Read SKILL.md again, then retry; no data operation was sent"
+        )
+    if args.command == "watch":
+        for event in watch_events(args.seconds, args.after, args.cursor_file):
+            emit(event, args.pretty)
+        return
+
+    if args.command == "recall":
+        result = call(
+            "/v1/search",
+            "POST",
+            {"keywords": args.keywords, "limit": args.limit, "scope": args.scope},
+        )
+    elif args.command == "remember":
+        result = call(
+            "/v1/memories",
+            "POST",
+            {
+                "content": args.content,
+                "kind": args.kind,
+                "source": args.source,
+                "tags": args.tag,
+                "keywords": args.keyword,
+                "metadata": json_value(args.metadata),
+            },
+        )
+    elif args.command == "entity":
+        if not args.entity_type or not args.keyword:
+            legacy = Path(args.name)
+            if not legacy.is_file():
+                raise ValueError("entity requires --type and at least one --keyword")
+            result = call("/v1/entities", "POST", file_json(legacy))
+        else:
+            result = call(
+                "/v1/entities",
+                "POST",
+                {
+                    "name": args.name,
+                    "entity_type": args.entity_type,
+                    "description": args.description,
+                    "source": args.source,
+                    "tags": args.tag,
+                    "keywords": args.keyword,
+                    "metadata": json_value(args.metadata),
+                },
+            )
+    elif args.command == "document":
+        content = (
+            args.content_file.read_text(encoding="utf-8") if args.content_file else args.content
+        )
+        result = call(
+            "/v1/documents",
+            "POST",
+            {
+                "title": args.title,
+                "file_id": args.file_id or None,
+                "content": content,
+                "source": args.source,
+                "tags": args.tag,
+                "keywords": args.keyword,
+                "metadata": json_value(args.metadata),
+            },
+        )
+    elif args.command == "upload":
+        with args.file.open("rb") as source:
+            result = call(
+                "/v1/files?filename=" + quote(args.file.name, safe=""), "POST", binary=source
+            )
+    elif args.command == "download":
+        result = download_file(args.id, args.output)
+    elif args.command == "relate":
+        result = call(
+            "/v1/relations",
+            "POST",
+            {
+                "source_id": args.source_id,
+                "target_id": args.target_id,
+                "relation": args.relation,
+                "reason": args.reason,
+            },
+        )
+    elif args.command == "relation-status":
+        result = call(
+            "/v1/relations/" + quote(args.id, safe=""),
+            "PATCH",
+            {"status": args.status, "reason": args.reason, "expected_version": args.version},
+        )
+    elif args.command == "keywords":
+        result = call(
+            "/v1/records/" + quote(args.id, safe="") + "/keywords",
+            "PUT",
+            {"keywords": args.keywords},
+        )
+    elif args.command == "feedback":
+        result = call(
+            "/v1/feature-requests",
+            "POST",
+            {
+                "title": args.title,
+                "description": args.description,
+                "agent_name": args.agent_name,
+                "use_case": args.use_case,
+                "priority": args.priority,
+                "source": args.source,
+                "client_request_id": args.client_request_id or None,
+            },
+        )
+    elif args.command == "feedback-list":
+        result = call("/v1/feature-requests")
+    elif args.command == "feedback-get":
+        result = call("/v1/feature-requests/" + quote(args.id, safe=""))
+    elif args.command == "from-json":
+        path = {
+            "memory": "/v1/memories",
+            "entity": "/v1/entities",
+            "document": "/v1/documents",
+            "feedback": "/v1/feature-requests",
+        }[args.type]
+        result = call(path, "POST", file_json(args.payload))
+    elif args.command == "list":
+        query = f"?limit={args.limit}&offset={args.offset}"
+        if args.kind:
+            query += "&kind=" + quote(args.kind, safe="")
+        result = call("/v1/records" + query)
+    else:
+        record_id = quote(args.id, safe="")
+        path = "/v1/graph/" if args.command == "graph" else "/v1/records/"
+        result = call(path + record_id, "DELETE" if args.command == "forget" else "GET")
+    emit(result, args.pretty)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, RuntimeError, json.JSONDecodeError) as error:
+        print(f"Vibe Memory: {error}", file=sys.stderr)
+        sys.exit(1)

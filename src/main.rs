@@ -314,6 +314,8 @@ fn connection() -> Result<Connection> {
 }
 
 fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = mode;
     let parent = path
         .parent()
         .context("Destination has no parent directory")?;

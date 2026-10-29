@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -118,6 +119,66 @@ def call(path, method="GET", body=None, binary=None):
         return json.loads(data) if data else {"deleted": True}
 
 
+
+def watch_events(seconds=60, after=0, cursor_file=None):
+    """Print authenticated SSE changes as JSON lines; reconnect using the last emitted ID."""
+    base = os.environ.get("MEMORY_URL", "http://127.0.0.1:8080").rstrip("/")
+    key = os.environ.get("MEMORY_API_KEY", "")
+    if not key:
+        raise ValueError("Set MEMORY_API_KEY in the agent environment")
+    if cursor_file and cursor_file.exists():
+        after = int(cursor_file.read_text().strip())
+    if after < 0 or after > 9223372036854775807:
+        raise ValueError("Invalid event cursor")
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        duration = max(1, min(25, int(deadline - time.monotonic())))
+        request = urllib.request.Request(
+            base + "/v1/events?seconds=" + str(duration),
+            headers={"Authorization": "Bearer " + key, "Accept": "text/event-stream",
+                     "Last-Event-ID": str(after), "User-Agent": "VibeMemorySkill/1.0"},
+        )
+        try:
+            with opener.open(request, timeout=duration + 15) as response:
+                if response.headers.get_content_type() != "text/event-stream":
+                    raise ValueError("Expected an SSE event stream")
+                event = {}
+                for raw in response:
+                    line = raw.decode("utf-8").rstrip("\r\n")
+                    if not line:
+                        if {"id", "event", "data"} <= event.keys():
+                            event_id = int(event["id"])
+                            if event_id > after:
+                                print(json.dumps({"id": event_id, "event": event["event"],
+                                                  "data": json.loads(event["data"])},
+                                                 ensure_ascii=False), flush=True)
+                                after = event_id
+                                if cursor_file:
+                                    cursor_file.parent.mkdir(parents=True, exist_ok=True)
+                                    with tempfile.NamedTemporaryFile(
+                                        mode="w", dir=cursor_file.parent, delete=False
+                                    ) as saved:
+                                        saved.write(str(after))
+                                        saved_path = Path(saved.name)
+                                    saved_path.replace(cursor_file)
+                        event = {}
+                    elif line.startswith(("id:", "event:", "data:")):
+                        name, value = line.split(":", 1)
+                        event[name] = value.lstrip(" ")
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(f"Event stream returned HTTP {error.code}") from None
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            print(f"Vibe Memory event stream interrupted ({type(error).__name__}); reconnecting",
+                  file=sys.stderr)
+        if time.monotonic() < deadline:
+            time.sleep(min(1, max(0, deadline - time.monotonic())))
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -160,6 +221,11 @@ def main():
     feature = commands.add_parser("feature-request", help="Read one submitted feature request")
     feature.add_argument("id")
     commands.add_parser("feature-requests", help="List this user's feature requests")
+    watch = commands.add_parser("watch", help="Receive live memory changes as JSON lines")
+    watch.add_argument("--seconds", type=int, choices=range(1, 3601), default=60,
+                       metavar="1..3600")
+    watch.add_argument("--after", type=int, default=0)
+    watch.add_argument("--cursor-file", type=Path)
     commands.add_parser("list")
     commands.add_parser("sync", help="Refresh the skill from the configured service")
     args = parser.parse_args()
@@ -169,6 +235,9 @@ def main():
         return
     if update["updated"]:
         raise RuntimeError("Skill updated. Read SKILL.md again, then retry the command; no API operation sent")
+    if args.command == "watch":
+        watch_events(args.seconds, args.after, args.cursor_file)
+        return
     if args.command == "recall":
         result = call(
             "/v1/search", "POST", dict(keywords=args.keywords, limit=args.limit, scope=args.scope)

@@ -39,6 +39,8 @@ The user signs in and approves the named agent on the web. Vault use is shown as
 ```sh
 # Search with keywords already extracted by the agent.
 vibe-memory recall project-name architecture
+vibe-memory recall project-name --match-mode hybrid --must-keyword active \
+  --exclude-keyword archived --min-score 0.6
 
 # Store an authorized durable outcome.
 vibe-memory remember "Use PostgreSQL for production" \
@@ -48,6 +50,16 @@ vibe-memory remember "Use PostgreSQL for production" \
 vibe-memory entity "Vibe Memory" --type Project --keyword vibememory
 vibe-memory relate SOURCE_ID TARGET_ID \
   --relation WORKS_ON --reason "Explicitly stated by the user"
+
+# Apply an agent-prepared, version-checked update, or archive and restore safely.
+vibe-memory update RECORD_ID update.json
+vibe-memory archive RECORD_ID --version 2 --reason "Merged duplicate"
+vibe-memory trash
+vibe-memory restore RECORD_ID --version 3 --reason "Archived in error"
+
+# Rewire relationships and archive duplicates after updating the canonical record.
+vibe-memory merge CANONICAL_ID DUPLICATE_ID \
+  --versions '@versions.json' --reason "Same entity confirmed from source records"
 
 # Upload opaque bytes; analysis stays in the agent.
 vibe-memory upload ./document.pdf

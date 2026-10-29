@@ -48,6 +48,26 @@ enum Command {
         limit: u16,
         #[arg(long, default_value = "all", value_parser = ["all", "memories", "documents", "entities"])]
         scope: String,
+        #[arg(long, default_value = "semantic", value_parser = ["semantic", "exact", "hybrid"])]
+        match_mode: String,
+        #[arg(long, default_value_t = 0.0)]
+        min_score: f64,
+        #[arg(long = "must-keyword")]
+        must_keywords: Vec<String>,
+        #[arg(long = "exclude-keyword")]
+        exclude_keywords: Vec<String>,
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        #[arg(
+            long,
+            default_value = "{}",
+            help = "Exact metadata filter JSON object or @file"
+        )]
+        metadata_filters: String,
+        #[arg(long)]
+        created_after: Option<String>,
+        #[arg(long)]
+        created_before: Option<String>,
     },
     /// Store an agent-authored durable memory.
     Remember {
@@ -130,6 +150,44 @@ enum Command {
     Get { id: String },
     /// Delete one record.
     Forget { id: String },
+    /// Update selected record fields from a prepared JSON object.
+    Update { id: String, payload: PathBuf },
+    /// Move a record to recoverable trash.
+    Archive {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Restore a record from recoverable trash.
+    Restore {
+        id: String,
+        #[arg(long)]
+        version: u64,
+        #[arg(long)]
+        reason: String,
+    },
+    /// List recoverable archived records.
+    Trash {
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    /// Rewire duplicate relationships and archive duplicate records.
+    Merge {
+        canonical_id: String,
+        #[arg(required = true)]
+        duplicate_ids: Vec<String>,
+        #[arg(
+            long,
+            help = "JSON object or @file mapping every record ID to its version"
+        )]
+        versions: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Read a record's relationship graph.
     Graph { id: String },
     /// List records.
@@ -972,10 +1030,30 @@ fn run() -> Result<()> {
             keywords,
             limit,
             scope,
+            match_mode,
+            min_score,
+            must_keywords,
+            exclude_keywords,
+            tags,
+            metadata_filters,
+            created_after,
+            created_before,
         } => call(
             Method::POST,
             "/v1/search",
-            Some(&json!({"keywords": keywords, "limit": limit, "scope": scope})),
+            Some(&json!({
+                "keywords": keywords,
+                "limit": limit,
+                "scope": scope,
+                "match_mode": match_mode,
+                "min_score": min_score,
+                "must_keywords": must_keywords,
+                "exclude_keywords": exclude_keywords,
+                "tags": tags,
+                "metadata_filters": json_object(&metadata_filters)?,
+                "created_after": created_after,
+                "created_before": created_before
+            })),
         )?,
         Command::Remember {
             content,
@@ -1144,6 +1222,49 @@ fn run() -> Result<()> {
         Command::Forget { id } => {
             call(Method::DELETE, &format!("/v1/records/{}", quote(&id)), None)?
         }
+        Command::Update { id, payload } => call(
+            Method::PATCH,
+            &format!("/v1/records/{}", quote(&id)),
+            Some(&file_json(&payload)?),
+        )?,
+        Command::Archive {
+            id,
+            version,
+            reason,
+        } => call(
+            Method::POST,
+            &format!("/v1/records/{}/archive", quote(&id)),
+            Some(&json!({"expected_version": version, "reason": reason})),
+        )?,
+        Command::Restore {
+            id,
+            version,
+            reason,
+        } => call(
+            Method::POST,
+            &format!("/v1/records/{}/restore", quote(&id)),
+            Some(&json!({"expected_version": version, "reason": reason})),
+        )?,
+        Command::Trash { limit, offset } => call(
+            Method::GET,
+            &format!("/v1/trash?limit={limit}&offset={offset}"),
+            None,
+        )?,
+        Command::Merge {
+            canonical_id,
+            duplicate_ids,
+            versions,
+            reason,
+        } => call(
+            Method::POST,
+            "/v1/records/merge",
+            Some(&json!({
+                "canonical_id": canonical_id,
+                "duplicate_ids": duplicate_ids,
+                "expected_versions": json_object(&versions)?,
+                "reason": reason
+            })),
+        )?,
         Command::Graph { id } => call(Method::GET, &format!("/v1/graph/{}", quote(&id)), None)?,
         Command::Vault { command } => match command {
             VaultCommand::List => call(Method::GET, "/v1/vault", None)?,
@@ -1243,6 +1364,38 @@ mod tests {
         };
         assert_eq!(variables, ["TOKEN=github-token"]);
         assert_eq!(command, [OsString::from("tool"), OsString::from("--flag")]);
+    }
+
+    #[test]
+    fn parses_search_relevance_controls() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "recall",
+            "project",
+            "--match-mode",
+            "hybrid",
+            "--must-keyword",
+            "active",
+            "--exclude-keyword",
+            "archived",
+            "--min-score",
+            "0.6",
+        ])
+        .unwrap();
+        let Command::Recall {
+            match_mode,
+            must_keywords,
+            exclude_keywords,
+            min_score,
+            ..
+        } = cli.command
+        else {
+            panic!("expected recall");
+        };
+        assert_eq!(match_mode, "hybrid");
+        assert_eq!(must_keywords, ["active"]);
+        assert_eq!(exclude_keywords, ["archived"]);
+        assert_eq!(min_score, 0.6);
     }
 
     #[test]

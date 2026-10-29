@@ -1545,7 +1545,24 @@ fn run() -> Result<()> {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let worker = std::thread::Builder::new()
+        .name("vibe-memory-cli".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run);
+    let result = match worker {
+        Ok(worker) => match worker.join() {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!("Vibe Memory: CLI worker panicked");
+                std::process::exit(1);
+            }
+        },
+        Err(error) => {
+            eprintln!("Vibe Memory: could not start CLI worker: {error}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = result {
         eprintln!("Vibe Memory: {error:#}");
         std::process::exit(1);
     }

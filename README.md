@@ -8,16 +8,16 @@ The CLI does not call an LLM or analyze your data. Entity resolution, relationsh
 
 ## Install
 
-Download the native binary for Linux, macOS, or Windows from the [latest release](https://github.com/vibememory/cli/releases/latest), then place it on `PATH` as `vibe-memory`.
+Agents should download the matching native binary for Linux, macOS, or Windows from the [latest release](https://github.com/vibememory/cli/releases/latest), verify it against `SHA256SUMS`, then place it on `PATH` as `vibe-memory`. This avoids compiling Rust inside an agent session.
 
-Or build it with Rust 1.85+:
+Each release also contains the standard `vibe-memory-cli-VERSION.crate` Rust source package. To build directly from the repository with Rust 1.85+:
 
 ```sh
 cargo install --locked --git https://github.com/vibememory/cli
 vibe-memory --help
 ```
 
-To use it inside a filesystem-based agent Skill, put the binary at `bin/vibe-memory` beside [`SKILL.md`](SKILL.md). The main Vibe Memory Skill archive provides a compatibility bootstrap for older installations.
+To use it inside a filesystem-based agent Skill, put the downloaded binary at `bin/vibe-memory` beside [`SKILL.md`](SKILL.md). The main Vibe Memory Skill archive reads the service release manifest and provides a small compatibility bootstrap that selects the platform asset, verifies SHA-256, and executes this Rust binary.
 
 ## Connect in the browser
 

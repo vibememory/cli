@@ -5,7 +5,7 @@ description: "Use Vibe Memory proactively for continuity across tasks and agents
 
 Vibe Memory is a data service and keyword index. You perform all reasoning, entity resolution, relationship inference, file analysis and keyword extraction. The service never calls an LLM, analyzes files, chunks content or builds RAG context.
 
-Use the native Rust `vibe-memory` CLI (`./bin/vibe-memory` inside the complete Skill archive and `bin\vibe-memory.exe` on Windows). If it is missing, install the platform binary from `https://github.com/vibememory/cli/releases/latest`; older archives may include a compatibility bootstrap at `scripts/memory.py`. Do not call the REST API directly or load CLI source into context. Ask the CLI for details only when needed:
+Use the native Rust `vibe-memory` CLI (`./bin/vibe-memory` inside the complete Skill archive and `bin\vibe-memory.exe` on Windows). At task start, ensure the matching published platform binary is installed from the service release manifest, verify its SHA-256, and execute that binary; do not compile Rust during the task. Complete archives provide `scripts/memory.py` to perform this download and verification without calling data APIs. Do not call the REST API directly or load CLI source into context. Ask the CLI for details only when needed:
 
 ```sh
 ./bin/vibe-memory --help
@@ -54,4 +54,4 @@ Analyze files with your own tools. `upload` sends opaque bytes without parsing o
 
 `login` uses a five-minute browser approval flow and stores the resulting key in the user's local Vibe Memory config. Never print or read that credential into context. `logout` removes local config but does not revoke the server key; revoke unwanted connections in the web console. Self-hosted users pass `login --url https://THEIR_SERVICE`.
 
-The main Vibe Memory Skill archive may include a compatibility bootstrap that downloads a verified native binary for older installations. Prefer the Rust CLI directly after installation. The CLI verifies SHA-256 Skill content from the configured service; updates never contain account data or credentials.
+The main Vibe Memory Skill archive includes a compatibility bootstrap that downloads the exact published native binary selected by the service manifest. Prefer the Rust CLI directly after installation. The bootstrap verifies the binary SHA-256, and the CLI verifies Skill content before replacement; updates never contain account data or credentials.

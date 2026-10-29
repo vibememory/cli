@@ -1,14 +1,16 @@
 [package]
 name = "vibe-memory-cli"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Token-efficient native CLI for Vibe Memory agents"
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/vibememory/cli"
 homepage = "https://vibememory.io"
 keywords = ["agents", "memory", "cli"]
 categories = ["command-line-utilities"]
+include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [[bin]]
 name = "vibe-memory"

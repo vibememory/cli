@@ -52,10 +52,21 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Build Rust source package
+        run: cargo package --locked
       - uses: actions/download-artifact@v4
         with:
           path: release
           merge-multiple: true
+      - name: Stage Rust source package
+        shell: bash
+        run: cp "target/package/vibe-memory-cli-${GITHUB_REF_NAME#v}.crate" release/
       - name: Generate checksums
         working-directory: release
         run: sha256sum vibe-memory-* > SHA256SUMS

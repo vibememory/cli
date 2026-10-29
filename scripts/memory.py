@@ -2,6 +2,7 @@
 """Portable REST adapter for an agent; Python standard library only."""
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -14,9 +15,73 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 
+def config_path():
+    base = os.environ.get("APPDATA") if os.name == "nt" else os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / "vibe-memory" / "client.json"
+
+
+def validate_origin(base):
+    base = base.strip().rstrip("/")
+    parsed = urlsplit(base)
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment or parsed.path):
+        raise ValueError("Use a service origin such as https://vibememory.io, without a path or credentials")
+    if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("HTTPS is required except on localhost")
+    return base
+
+
+def read_config():
+    path = config_path()
+    if not path.exists():
+        return {}
+    if os.name != "nt" and path.stat().st_mode & 0o077:
+        raise ValueError("Client config permissions are too broad; run chmod 600 on " + str(path))
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Invalid client configuration")
+    return data
+
+
+def connection():
+    saved = read_config()
+    base = validate_origin(os.environ.get("MEMORY_URL") or saved.get("url") or "https://vibememory.io")
+    key = os.environ.get("MEMORY_API_KEY")
+    if key is None:
+        # Never send a saved key to an origin selected by an unrelated environment override.
+        key = saved.get("api_key", "") if saved.get("url") == base else ""
+    return base, key
+
+
+def configure():
+    if not sys.stdin.isatty() or not sys.stderr.isatty():
+        raise ValueError("Run configure in your own interactive terminal; API keys must not be pasted into agent chat")
+    saved = read_config()
+    default = saved.get("url") or "https://vibememory.io"
+    base = validate_origin(input(f"Server URL [{default}]: ").strip() or default)
+    print("Create an agent API key at " + base + "/console; paste it below (hidden).")
+    key = getpass.getpass("API key: ").strip()
+    if not key or any(char.isspace() for char in key):
+        raise ValueError("Enter a nonempty API key without whitespace")
+    # Verify before saving, using only the URL and key entered in this terminal.
+    call("/v1/me", credentials=(base, key))
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                     delete=False) as temporary:
+        json.dump({"url": base, "api_key": key}, temporary)
+        temporary_path = Path(temporary.name)
+    try:
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    print("Connected. Credentials saved locally to " + str(path))
+    if os.environ.get("MEMORY_URL") or os.environ.get("MEMORY_API_KEY"):
+        print("Note: MEMORY_URL / MEMORY_API_KEY environment variables override saved settings.")
+
 def sync_skill():
     """Refresh fixed skill files from the configured service, without sending credentials."""
-    base = os.environ.get("MEMORY_URL", "http://127.0.0.1:8080").rstrip("/")
+    base, _ = connection()
     parsed = urlsplit(base)
     if (parsed.scheme not in ("http", "https") or not parsed.hostname
             or parsed.username or parsed.password or parsed.query or parsed.fragment):
@@ -72,9 +137,9 @@ def sync_skill():
     return {"revision": revision, "updated": bool(pending),
             "instruction": "Read SKILL.md again before continuing" if pending else "Skill is current"}
 
-def call(path, method="GET", body=None, binary=None):
-    base = os.environ.get("MEMORY_URL", "http://127.0.0.1:8080").rstrip("/")
-    key = os.environ.get("MEMORY_API_KEY", "")
+def call(path, method="GET", body=None, binary=None, credentials=None):
+    base, key = credentials if credentials is not None else connection()
+    base = validate_origin(base)
     parsed = urlsplit(base)
     if (
         parsed.scheme not in ("http", "https")
@@ -86,7 +151,7 @@ def call(path, method="GET", body=None, binary=None):
     if parsed.scheme == "http" and parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError("Use HTTPS when sending an API key to a remote service")
     if not key:
-        raise ValueError("Set MEMORY_API_KEY in the agent environment")
+        raise ValueError("Run configure in your terminal, or set MEMORY_API_KEY in the agent environment")
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
                "User-Agent": "VibeMemorySkill/1.0"}
     if binary is not None:
@@ -122,10 +187,9 @@ def call(path, method="GET", body=None, binary=None):
 
 def watch_events(seconds=60, after=0, cursor_file=None):
     """Print authenticated SSE changes as JSON lines; reconnect using the last emitted ID."""
-    base = os.environ.get("MEMORY_URL", "http://127.0.0.1:8080").rstrip("/")
-    key = os.environ.get("MEMORY_API_KEY", "")
+    base, key = connection()
     if not key:
-        raise ValueError("Set MEMORY_API_KEY in the agent environment")
+        raise ValueError("Run configure in your terminal, or set MEMORY_API_KEY in the agent environment")
     if cursor_file and cursor_file.exists():
         after = int(cursor_file.read_text().strip())
     if after < 0 or after > 9223372036854775807:
@@ -228,7 +292,21 @@ def main():
     watch.add_argument("--cursor-file", type=Path)
     commands.add_parser("list")
     commands.add_parser("sync", help="Refresh the skill from the configured service")
+    commands.add_parser("configure", help="Interactively verify and save URL and API key (hidden input)")
+    commands.add_parser("status", help="Check authentication without displaying the API key")
+    commands.add_parser("logout", help="Remove locally saved credentials; does not revoke server keys")
     args = parser.parse_args()
+    if args.command == "configure":
+        configure()
+        return
+    if args.command == "status":
+        call("/v1/me")
+        print(json.dumps({"connected": True, "url": connection()[0]}, indent=2))
+        return
+    if args.command == "logout":
+        config_path().unlink(missing_ok=True)
+        print("Local credentials removed. Environment credentials are unchanged; revoke keys in the console if needed.")
+        return
     update = sync_skill()
     if args.command == "sync":
         print(json.dumps(update, ensure_ascii=False, indent=2))

@@ -7,7 +7,22 @@ The service is a data endpoint and local keyword vector index. **You, the connec
 
 For the hosted service, the user signs in at `https://vibememory.io/login` and creates an agent API key in the console. Set `MEMORY_URL=https://vibememory.io`. Use the issued key as `MEMORY_API_KEY`; never ask for the account password or copy browser session cookies into an agent. Self-hosted endpoints also work.
 
-Use `scripts/memory.py` with `MEMORY_URL` (default `http://127.0.0.1:8080`) and `MEMORY_API_KEY`. Different agent keys mapped to the same server user ID share data. Do not print keys or include them in stored content.
+The ZIP includes the standalone Python CLI `scripts/memory.py` (standard library only, no server/model installation needed). Prefer its saved client configuration below; `MEMORY_URL` and `MEMORY_API_KEY` remain supported environment overrides. The default service is `https://vibememory.io`. Different agent keys mapped to the same server user ID share data. Do not print keys or include them in stored content.
+
+## Set up the bundled CLI first
+
+Install the complete skill ZIP, including `scripts/memory.py`. Check `python3 scripts/memory.py status`. If credentials are missing or rejected, guide the user to run this in their own interactive terminal:
+
+```sh
+python3 scripts/memory.py configure
+python3 scripts/memory.py status
+```
+
+On Windows, `py` may be used instead of `python3`. Configure prompts for the service URL (default `https://vibememory.io`) and a hidden API key, verifies it against `/v1/me`, then atomically saves it to the user's `vibe-memory/client.json` configuration file. The location is `$XDG_CONFIG_HOME` or `~/.config` on Unix and `%APPDATA%` on Windows. On Unix the credential file is owner-readable/writable only. This is a local plaintext credential file, not a system keychain; use environment injection instead when persistent credentials are unsuitable. The saved configuration works across agents running under the same OS account.
+
+The user obtains a key by signing into the service console. Never ask them to paste a key into chat, pass it as a command-line argument, or include it in source files, logs or a skill archive. Do not read the credential file into agent context. The interactive command intentionally refuses a noninteractive agent terminal: ask the user to run it themselves there. Then continue with `status`, `sync` and the memory commands, without exporting the key manually.
+
+`MEMORY_URL` and `MEMORY_API_KEY` override saved values. A saved key is used only for its saved origin: changing the URL alone never sends that key to another server. `python3 scripts/memory.py logout` removes the local saved configuration; it does not revoke the server key or unset environment variables. Revoke unwanted keys in the console. Configuration is stored outside the skill directory and survives skill updates.
 
 ## Always refresh before using this skill
 

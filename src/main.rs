@@ -330,6 +330,10 @@ fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<()> {
             .as_file()
             .set_permissions(fs::Permissions::from_mode(mode))?;
     }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
     temporary
         .persist(path)
         .map_err(|error| anyhow!("Cannot replace {}: {}", path.display(), error.error))?;

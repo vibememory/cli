@@ -56,7 +56,9 @@ vibe-memory security RECORD_ID --version 1 --trust-level trusted --state active 
 # Store a resolved entity and relationship.
 vibe-memory entity "Vibe Memory" --type Project --keyword vibememory
 vibe-memory relate SOURCE_ID TARGET_ID \
-  --relation WORKS_ON --reason "Explicitly stated by the user"
+  --relation WORKS_ON --reason "Explicitly stated by the user" \
+  --confidence 0.92 --evidence-id RECORD_ID \
+  --extraction-method structured-output --extraction-version agent-v2
 
 # Apply an agent-prepared, version-checked update, or archive and restore safely.
 vibe-memory update RECORD_ID update.json

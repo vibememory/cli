@@ -142,6 +142,14 @@ enum Command {
         relation: String,
         #[arg(long)]
         reason: String,
+        #[arg(long)]
+        confidence: Option<f64>,
+        #[arg(long = "evidence-id")]
+        evidence_record_ids: Vec<String>,
+        #[arg(long, default_value = "")]
+        extraction_method: String,
+        #[arg(long, default_value = "")]
+        extraction_version: String,
     },
     /// Retract or restore a relationship.
     RelationStatus {
@@ -1360,6 +1368,10 @@ fn run() -> Result<()> {
             target_id,
             relation,
             reason,
+            confidence,
+            evidence_record_ids,
+            extraction_method,
+            extraction_version,
         } => call(
             Method::POST,
             "/v1/relations",
@@ -1367,7 +1379,11 @@ fn run() -> Result<()> {
                 "source_id": source_id,
                 "target_id": target_id,
                 "relation": relation,
-                "reason": reason
+                "reason": reason,
+                "confidence": confidence,
+                "evidence_record_ids": evidence_record_ids,
+                "extraction_method": extraction_method,
+                "extraction_version": extraction_version
             })),
         )?,
         Command::RelationStatus {
@@ -1778,6 +1794,46 @@ mod tests {
     fn templates_are_objects() {
         assert_eq!(template("entity")["entity_type"], "Person");
         assert!(template("document")["metadata"].is_object());
+    }
+
+    #[test]
+    fn parses_relation_claim_metadata() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "relate",
+            "source",
+            "target",
+            "--relation",
+            "PREFERS",
+            "--reason",
+            "explicit evidence",
+            "--confidence",
+            "0.82",
+            "--evidence-id",
+            "record-a",
+            "--evidence-id",
+            "record-b",
+            "--extraction-method",
+            "structured-output",
+            "--extraction-version",
+            "agent-v2",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Relate {
+                confidence,
+                evidence_record_ids,
+                extraction_method,
+                extraction_version,
+                ..
+            } => {
+                assert_eq!(confidence, Some(0.82));
+                assert_eq!(evidence_record_ids, ["record-a", "record-b"]);
+                assert_eq!(extraction_method, "structured-output");
+                assert_eq!(extraction_version, "agent-v2");
+            }
+            _ => panic!("expected relate command"),
+        }
     }
 
     #[test]

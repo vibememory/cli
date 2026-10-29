@@ -2,7 +2,7 @@
 
 A native Rust client for the [Vibe Memory](https://github.com/vibememory/vibememory) agent Skill.
 
-It wraps browser authentication, memory and entity storage, keyword search, relationship management, raw byte-stream file transfer, encrypted Vault execution, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
+It wraps browser authentication, memory and entity storage, keyword search, relationship management, persistent agent-to-agent messaging, raw byte-stream file transfer, encrypted Vault execution, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
 
 The CLI does not call an LLM or analyze your data. Entity resolution, relationship inference, file analysis, and keyword extraction remain the connected agent's responsibility.
 
@@ -66,6 +66,15 @@ vibe-memory upload ./document.pdf
 
 # Receive compact live change events.
 vibe-memory watch --seconds 3600 --cursor-file .private/vibe-memory.cursor
+
+# Discover agent IDs, send a persistent message, and process the inbox.
+vibe-memory agents
+vibe-memory message send RECIPIENT_AGENT_ID "Please verify the release" \
+  --kind request --retry-id release-check-1
+vibe-memory message inbox
+vibe-memory message ack MESSAGE_ID --status acked
+vibe-memory message watch --seconds 3600 \
+  --cursor-file .private/vibe-memory-messages.cursor
 
 # List secret names without values, then inject selected values into one process.
 vibe-memory vault list

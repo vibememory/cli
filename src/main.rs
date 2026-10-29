@@ -28,7 +28,7 @@ const MAX_DISTRIBUTION_BYTES: u64 = 1024 * 1024;
 #[command(
     name = "vibe-memory",
     version,
-    about = "Native CLI for agent-authored memory, files, graph, Vault, feedback, and live events"
+    about = "Native CLI for agent-authored memory, messages, files, graph, Vault, feedback, and live events"
 )]
 struct Cli {
     #[arg(long, global = true, help = "Indent JSON output (default is compact)")]
@@ -219,6 +219,13 @@ enum Command {
     FeedbackList,
     /// Read a submitted feature request.
     FeedbackGet { id: String },
+    /// List addressable agents connected to this account.
+    Agents,
+    /// Exchange persistent messages with other connected agents.
+    Message {
+        #[command(subcommand)]
+        command: MessageCommand,
+    },
     /// Submit a fully prepared JSON object.
     FromJson {
         #[arg(value_parser = ["memory", "entity", "document", "feedback"])]
@@ -280,6 +287,62 @@ enum VaultCommand {
         variables: Vec<String>,
         #[arg(last = true, required = true)]
         command: Vec<OsString>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MessageCommand {
+    /// Queue a message for one connected agent.
+    Send {
+        recipient_agent_id: String,
+        body: String,
+        #[arg(long, default_value = "")]
+        subject: String,
+        #[arg(long, default_value = "message", value_parser = ["message", "request", "response", "notification"])]
+        kind: String,
+        #[arg(long, default_value = "{}", help = "JSON object or @file")]
+        metadata: String,
+        #[arg(long)]
+        reply_to: Option<String>,
+        #[arg(long)]
+        thread_id: Option<String>,
+        #[arg(long, default_value_t = 604800, value_parser = clap::value_parser!(u32).range(60..=2592000))]
+        expires_in: u32,
+        #[arg(long = "retry-id", default_value = "")]
+        client_request_id: String,
+    },
+    /// List non-expired messages addressed to this connection.
+    Inbox {
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long, value_parser = ["queued", "delivered", "read", "acked"])]
+        status: Option<String>,
+    },
+    /// List messages sent by this connection.
+    Sent {
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    /// Read one sent or received message.
+    Get { id: String },
+    /// Advance an incoming message's acknowledgement state.
+    Ack {
+        id: String,
+        #[arg(long, value_parser = ["delivered", "read", "acked"])]
+        status: String,
+    },
+    /// Print incoming messages as compact SSE-derived JSON lines.
+    Watch {
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        seconds: u64,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long)]
+        cursor_file: Option<PathBuf>,
     },
 }
 
@@ -811,7 +874,8 @@ fn save_cursor(path: &Path, value: u64) -> Result<()> {
     atomic_write(path, value.to_string().as_bytes(), 0o600)
 }
 
-fn watch_events(
+fn watch_stream(
+    endpoint: &str,
     seconds: u64,
     mut after: u64,
     cursor_file: Option<&Path>,
@@ -830,7 +894,7 @@ fn watch_events(
         let request = authenticated_request(
             &credentials,
             Method::GET,
-            &format!("/v1/events?seconds={duration}"),
+            &format!("{endpoint}?seconds={duration}"),
             Duration::from_secs(duration + 15),
         )?
         .header(ACCEPT, "text/event-stream")
@@ -888,6 +952,25 @@ fn watch_events(
         }
     }
     Ok(())
+}
+
+fn watch_events(seconds: u64, after: u64, cursor_file: Option<&Path>, pretty: bool) -> Result<()> {
+    watch_stream("/v1/events", seconds, after, cursor_file, pretty)
+}
+
+fn watch_messages(
+    seconds: u64,
+    after: u64,
+    cursor_file: Option<&Path>,
+    pretty: bool,
+) -> Result<()> {
+    watch_stream(
+        "/v1/agent-messages/stream",
+        seconds,
+        after,
+        cursor_file,
+        pretty,
+    )
 }
 
 fn template(kind: &str) -> Value {
@@ -1023,6 +1106,17 @@ fn run() -> Result<()> {
     } = &cli.command
     {
         return watch_events(*seconds, *after, cursor_file.as_deref(), cli.pretty);
+    }
+    if let Command::Message {
+        command:
+            MessageCommand::Watch {
+                seconds,
+                after,
+                cursor_file,
+            },
+    } = &cli.command
+    {
+        return watch_messages(*seconds, *after, cursor_file.as_deref(), cli.pretty);
     }
 
     let result = match cli.command {
@@ -1197,6 +1291,66 @@ fn run() -> Result<()> {
             &format!("/v1/feature-requests/{}", quote(&id)),
             None,
         )?,
+        Command::Agents => call(Method::GET, "/v1/agents", None)?,
+        Command::Message { command } => match command {
+            MessageCommand::Send {
+                recipient_agent_id,
+                body,
+                subject,
+                kind,
+                metadata,
+                reply_to,
+                thread_id,
+                expires_in,
+                client_request_id,
+            } => call(
+                Method::POST,
+                "/v1/agent-messages",
+                Some(&json!({
+                    "recipient_agent_id": recipient_agent_id,
+                    "body": body,
+                    "subject": subject,
+                    "kind": kind,
+                    "metadata": json_object(&metadata)?,
+                    "reply_to": reply_to,
+                    "thread_id": thread_id,
+                    "expires_in_seconds": expires_in,
+                    "client_request_id": if client_request_id.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(client_request_id)
+                    }
+                })),
+            )?,
+            MessageCommand::Inbox {
+                after,
+                limit,
+                status,
+            } => {
+                let mut endpoint = format!("/v1/agent-messages/inbox?after={after}&limit={limit}");
+                if let Some(status) = status {
+                    endpoint.push_str("&status=");
+                    endpoint.push_str(&quote(&status));
+                }
+                call(Method::GET, &endpoint, None)?
+            }
+            MessageCommand::Sent { limit, offset } => call(
+                Method::GET,
+                &format!("/v1/agent-messages/sent?limit={limit}&offset={offset}"),
+                None,
+            )?,
+            MessageCommand::Get { id } => call(
+                Method::GET,
+                &format!("/v1/agent-messages/{}", quote(&id)),
+                None,
+            )?,
+            MessageCommand::Ack { id, status } => call(
+                Method::POST,
+                &format!("/v1/agent-messages/{}/ack", quote(&id)),
+                Some(&json!({"status": status})),
+            )?,
+            MessageCommand::Watch { .. } => unreachable!(),
+        },
         Command::FromJson { kind, payload } => {
             let path = match kind.as_str() {
                 "memory" => "/v1/memories",
@@ -1396,6 +1550,51 @@ mod tests {
         assert_eq!(must_keywords, ["active"]);
         assert_eq!(exclude_keywords, ["archived"]);
         assert_eq!(min_score, 0.6);
+    }
+
+    #[test]
+    fn parses_agent_message_commands() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "message",
+            "send",
+            "key:recipient",
+            "verify release",
+            "--kind",
+            "request",
+            "--retry-id",
+            "release-1",
+        ])
+        .unwrap();
+        let Command::Message {
+            command:
+                MessageCommand::Send {
+                    recipient_agent_id,
+                    body,
+                    kind,
+                    client_request_id,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected message send");
+        };
+        assert_eq!(recipient_agent_id, "key:recipient");
+        assert_eq!(body, "verify release");
+        assert_eq!(kind, "request");
+        assert_eq!(client_request_id, "release-1");
+
+        assert!(
+            Cli::try_parse_from([
+                "vibe-memory",
+                "message",
+                "ack",
+                "message-id",
+                "--status",
+                "queued",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -9,6 +9,14 @@ For the hosted service, the user signs in at `https://vibememory.io/login` and c
 
 Use `scripts/memory.py` with `MEMORY_URL` (default `http://127.0.0.1:8080`) and `MEMORY_API_KEY`. Different agent keys mapped to the same server user ID share data. Do not print keys or include them in stored content.
 
+## Always refresh before using this skill
+
+At the start of every task using Vibe Memory, run `python3 scripts/memory.py sync` against the configured `MEMORY_URL`. This public web endpoint requires no API key. If `updated` is true, read the refreshed `SKILL.md` before planning or sending any memory operation. Do not rely on a previously loaded copy of the instructions.
+
+The helper also checks the web manifest before every API operation. If it updates files, it stops before sending the operation: reread the skill and retry once under the new instructions. If the update service is unavailable or verification fails, report the failure and stop; do not silently continue with stale instructions. Do not claim that a running agent can reload instructions without rereading them. Updates replace only this skill's `SKILL.md` and `scripts/memory.py`; keep customizations elsewhere. A read-only skill installation must be updated by its administrator.
+
+The current manifest is `/skills/vibe-memory/manifest.json`, the readable instructions are `/skills/vibe-memory/SKILL.md`, and the full install archive is `/downloads/vibe-memory-skill.zip`, all on the configured service origin. Use that origin for self-hosted installations too. The manifest revision is a SHA-256 of the file digest map; downloads use revision-specific paths and every file is verified before replacement. Credentials are never sent to these public distribution endpoints. The website serves the version included in its current deployment; a self-hosted server updates when its operator deploys a new release.
+
 ## Store memories and entities
 
 1. Identify the durable facts, entities, types and relationships supported by the user's material. Distinguish explicit statements from inferred claims; record confidence and evidence in `metadata`. Save when requested or authorized, rather than indiscriminately recording conversations.

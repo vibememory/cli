@@ -20,6 +20,12 @@ python3 scripts/memory.py status
 
 On Windows, `py` may be used instead of `python3`. Configure prompts for the service URL (default `https://vibememory.io`) and a hidden API key, verifies it against `/v1/me`, then atomically saves it to the user's `vibe-memory/client.json` configuration file. The location is `$XDG_CONFIG_HOME` or `~/.config` on Unix and `%APPDATA%` on Windows. On Unix the credential file is owner-readable/writable only. This is a local plaintext credential file, not a system keychain; use environment injection instead when persistent credentials are unsuitable. The saved configuration works across agents running under the same OS account.
 
+When authentication is missing or rejected, present a clickable link in the conversation **before** the terminal command: `[로그인하고 에이전트 키 발급하기](https://vibememory.io/console)` for the hosted service. For self-hosting, use the configured service origin plus `/console` as the link target. Explain that the user should sign in there, create an agent API key, then run `configure` in their own terminal and paste the key into its hidden prompt. Do not merely mention the console without a clickable link, leave the user to find the site, or ask for their key in chat. If the skill is not installed, also provide `[CLI 포함 Skill 다운로드](https://vibememory.io/downloads/vibe-memory-skill.zip)` (use the configured origin for self-hosting).
+
+Example hosted onboarding message:
+
+> [로그인하고 에이전트 키 발급하기](https://vibememory.io/console)에서 키를 만드세요. 그다음 본인 터미널에서 `python3 scripts/memory.py configure`를 실행하고 키를 입력하면 됩니다. 키는 채팅에 보내지 마세요.
+
 The user obtains a key by signing into the service console. Never ask them to paste a key into chat, pass it as a command-line argument, or include it in source files, logs or a skill archive. Do not read the credential file into agent context. The interactive command intentionally refuses a noninteractive agent terminal: ask the user to run it themselves there. Then continue with `status`, `sync` and the memory commands, without exporting the key manually.
 
 `MEMORY_URL` and `MEMORY_API_KEY` override saved values. A saved key is used only for its saved origin: changing the URL alone never sends that key to another server. `python3 scripts/memory.py logout` removes the local saved configuration; it does not revoke the server key or unset environment variables. Revoke unwanted keys in the console. Configuration is stored outside the skill directory and survives skill updates.

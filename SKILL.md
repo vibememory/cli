@@ -9,26 +9,21 @@ For the hosted service, the user signs in at `https://vibememory.io/login` and c
 
 The ZIP includes the standalone Python CLI `scripts/memory.py` (standard library only, no server/model installation needed). Prefer its saved client configuration below; `MEMORY_URL` and `MEMORY_API_KEY` remain supported environment overrides. The default service is `https://vibememory.io`. Different agent keys mapped to the same server user ID share data. Do not print keys or include them in stored content.
 
-## Set up the bundled CLI first
+## Connect through a web approval link
 
-Install the complete skill ZIP, including `scripts/memory.py`. Check `python3 scripts/memory.py status`. If credentials are missing or rejected, guide the user to run this in their own interactive terminal:
+The complete ZIP includes a standalone standard-library Python CLI. Check `python3 scripts/memory.py status`. If authentication is missing or rejected, **start the login command yourself** using your tool's background-process facility:
 
 ```sh
-python3 scripts/memory.py configure
-python3 scripts/memory.py status
+python3 scripts/memory.py login --no-browser --name "YOUR_AGENT_NAME"
 ```
 
-On Windows, `py` may be used instead of `python3`. Configure prompts for the service URL (default `https://vibememory.io`) and a hidden API key, verifies it against `/v1/me`, then atomically saves it to the user's `vibe-memory/client.json` configuration file. The location is `$XDG_CONFIG_HOME` or `~/.config` on Unix and `%APPDATA%` on Windows. On Unix the credential file is owner-readable/writable only. This is a local plaintext credential file, not a system keychain; use environment injection instead when persistent credentials are unsuitable. The saved configuration works across agents running under the same OS account.
+Use `--url https://YOUR_SERVICE` for self-hosting. The command prints a public approval URL and confirmation code, then waits up to five minutes. Read that output and present the actual generated URL as a clickable link in the conversation, for example `[로그인하고 에이전트 연결 승인하기](ACTUAL_GENERATED_URL)`. Include the confirmation code so the user can match it. The user only opens the link, signs in and clicks **연결 승인**; do not ask them to run terminal commands, create/copy a key manually, or send credentials in chat. If they are already logged in, the link goes directly to approval. The browser returns to the approval page after login. After approval, the waiting CLI receives a one-time agent key and saves it locally without displaying it. Inspect the waiting process result and run `status` to verify completion before claiming the connection succeeded.
 
-When authentication is missing or rejected, present a clickable link in the conversation **before** the terminal command: `[로그인하고 에이전트 키 발급하기](https://vibememory.io/console)` for the hosted service. For self-hosting, use the configured service origin plus `/console` as the link target. Explain that the user should sign in there, create an agent API key, then run `configure` in their own terminal and paste the key into its hidden prompt. Do not merely mention the console without a clickable link, leave the user to find the site, or ask for their key in chat. If the skill is not installed, also provide `[CLI 포함 Skill 다운로드](https://vibememory.io/downloads/vibe-memory-skill.zip)` (use the configured origin for self-hosting).
+Do not stop the waiting process after presenting its link. Let it finish while the user approves. A denial, expiry or failed process is not authorization: report it and start a fresh request only when appropriate. Never approve on the user's behalf. Approve only requests the user initiated and ensure they can see the agent name, account and matching code. The private device code stays inside the CLI process and must not be posted in chat or URLs. The public approval link is valid for five minutes and is not an API credential. If your tools cannot keep a process running, explain that limitation and offer `login` in the user's terminal as a fallback; do not pretend browser approval can provision an agent that never started a request.
 
-Example hosted onboarding message:
+On a local user machine, `python3 scripts/memory.py login` can also open the browser automatically. On Windows `py` may be used. If the skill is missing, provide `[CLI 포함 Skill 다운로드](https://vibememory.io/downloads/vibe-memory-skill.zip)` (use the configured origin for self-hosting), install it using available tools, then begin login.
 
-> [로그인하고 에이전트 키 발급하기](https://vibememory.io/console)에서 키를 만드세요. 그다음 본인 터미널에서 `python3 scripts/memory.py configure`를 실행하고 키를 입력하면 됩니다. 키는 채팅에 보내지 마세요.
-
-The user obtains a key by signing into the service console. Never ask them to paste a key into chat, pass it as a command-line argument, or include it in source files, logs or a skill archive. Do not read the credential file into agent context. The interactive command intentionally refuses a noninteractive agent terminal: ask the user to run it themselves there. Then continue with `status`, `sync` and the memory commands, without exporting the key manually.
-
-`MEMORY_URL` and `MEMORY_API_KEY` override saved values. A saved key is used only for its saved origin: changing the URL alone never sends that key to another server. `python3 scripts/memory.py logout` removes the local saved configuration; it does not revoke the server key or unset environment variables. Revoke unwanted keys in the console. Configuration is stored outside the skill directory and survives skill updates.
+Credentials are saved outside the skill directory at `$XDG_CONFIG_HOME/vibe-memory/client.json` (default `~/.config/vibe-memory/client.json`) or `%APPDATA%/vibe-memory/client.json` on Windows. This is a local plaintext file, not a system keychain; Unix permissions are 0600. Do not read it into agent context. Environment-injected `MEMORY_URL` and `MEMORY_API_KEY` override saved values; a saved key is never sent to a different origin selected by the URL alone. If stale environment credentials override a successful login, resolve that configuration without exposing the key. `logout` removes local settings but does not revoke a server key or unset environment variables; revoke unwanted keys in the console. `configure` remains an optional hidden-key terminal fallback for users who already have a key, not the default onboarding flow.
 
 ## Always refresh before using this skill
 

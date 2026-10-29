@@ -11,6 +11,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -53,6 +54,68 @@ def connection():
     return base, key
 
 
+
+def save_credentials(base, key):
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                     delete=False) as temporary:
+        json.dump({"url": base, "api_key": key}, temporary)
+        temporary_path = Path(temporary.name)
+    try:
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def browser_login(base, name, no_browser=False):
+    base = validate_origin(base)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+
+    def post(path, payload):
+        request = urllib.request.Request(
+            base + path, data=json.dumps(payload).encode(), method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": "VibeMemorySkill/1.0"},
+        )
+        try:
+            with opener.open(request, timeout=20) as response:
+                return json.loads(response.read(16384))
+        except urllib.error.HTTPError as error:
+            messages = {403: "Connection denied", 410: "Connection expired; run login again",
+                        422: "Cannot create a key; check the console key limit",
+                        429: "Too many requests; wait before retrying"}
+            raise RuntimeError(messages.get(error.code, f"Login returned HTTP {error.code}")) from None
+
+    pending = post("/auth/device/start", {"name": name})
+    code = pending["user_code"]
+    if len(code) != 10 or any(char not in "ABCDEF0123456789" for char in code):
+        raise ValueError("Invalid verification code")
+    url = base + "/connect?code=" + code
+    print("Approve this agent in your browser: " + url, flush=True)
+    print("Confirm code: " + code + " (expires in 5 minutes)", flush=True)
+    if not no_browser:
+        webbrowser.open(url)
+    deadline = time.monotonic() + min(300, pending["expires_in"])
+    interval = max(3, min(10, pending.get("interval", 3)))
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        result = post("/auth/device/poll", {"device_code": pending["device_code"]})
+        if result["state"] == "connected":
+            call("/v1/me", credentials=(base, result["key"]))
+            save_credentials(base, result["key"])
+            print("Connected. Credentials saved locally; no API key needs to be copied.", flush=True)
+            if os.environ.get("MEMORY_URL") or os.environ.get("MEMORY_API_KEY"):
+                print("Note: environment credentials override saved settings.", flush=True)
+            return
+        if result["state"] != "pending":
+            raise RuntimeError("Unexpected login state")
+    raise RuntimeError("Connection expired; run login again")
+
 def configure():
     if not sys.stdin.isatty() or not sys.stderr.isatty():
         raise ValueError("Run configure in your own interactive terminal; API keys must not be pasted into agent chat")
@@ -65,16 +128,8 @@ def configure():
         raise ValueError("Enter a nonempty API key without whitespace")
     # Verify before saving, using only the URL and key entered in this terminal.
     call("/v1/me", credentials=(base, key))
+    save_credentials(base, key)
     path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                     delete=False) as temporary:
-        json.dump({"url": base, "api_key": key}, temporary)
-        temporary_path = Path(temporary.name)
-    try:
-        temporary_path.replace(path)
-    finally:
-        temporary_path.unlink(missing_ok=True)
     print("Connected. Credentials saved locally to " + str(path))
     if os.environ.get("MEMORY_URL") or os.environ.get("MEMORY_API_KEY"):
         print("Note: MEMORY_URL / MEMORY_API_KEY environment variables override saved settings.")
@@ -292,10 +347,17 @@ def main():
     watch.add_argument("--cursor-file", type=Path)
     commands.add_parser("list")
     commands.add_parser("sync", help="Refresh the skill from the configured service")
+    login = commands.add_parser("login", help="Sign in and approve this agent in the browser")
+    login.add_argument("--url", help="Service origin (defaults to saved configuration or hosted service)")
+    login.add_argument("--name", default="Connected agent")
+    login.add_argument("--no-browser", action="store_true", help="Print approval link for a remote agent")
     commands.add_parser("configure", help="Interactively verify and save URL and API key (hidden input)")
     commands.add_parser("status", help="Check authentication without displaying the API key")
     commands.add_parser("logout", help="Remove locally saved credentials; does not revoke server keys")
     args = parser.parse_args()
+    if args.command == "login":
+        browser_login(args.url or connection()[0], args.name, args.no_browser)
+        return
     if args.command == "configure":
         configure()
         return

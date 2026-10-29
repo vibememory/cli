@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::Method;
-use reqwest::blocking::{Body, Client, RequestBuilder};
+use reqwest::blocking::{Body, Client, ClientBuilder, RequestBuilder};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
+use reqwest::{Certificate, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -555,13 +555,65 @@ fn save_credentials(base: &str, key: &str) -> Result<()> {
     atomic_write(&config_path()?, &data, 0o600)
 }
 
-fn http_client(timeout: Duration) -> Result<Client> {
-    Client::builder()
+fn configured_ca_bundle_with<F>(mut lookup: F) -> Option<(String, PathBuf)>
+where
+    F: FnMut(&str) -> Option<OsString>,
+{
+    for variable in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"] {
+        let Some(value) = lookup(variable) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        return Some((variable.to_owned(), PathBuf::from(value)));
+    }
+    None
+}
+
+fn configured_ca_bundle() -> Option<(String, PathBuf)> {
+    configured_ca_bundle_with(env::var_os)
+}
+
+fn http_client_with_ca_bundle(
+    timeout: Duration,
+    ca_bundle: Option<(&str, &Path)>,
+) -> Result<Client> {
+    let mut builder: ClientBuilder = Client::builder()
         .user_agent(USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
-        .build()
-        .context("Cannot initialize HTTPS client")
+        .timeout(timeout);
+    if let Some((variable, path)) = ca_bundle {
+        let pem = fs::read(path).with_context(|| {
+            format!("Cannot read CA bundle from {variable} ({})", path.display())
+        })?;
+        let certificates = Certificate::from_pem_bundle(&pem).with_context(|| {
+            format!(
+                "Cannot parse PEM CA bundle from {variable} ({})",
+                path.display()
+            )
+        })?;
+        if certificates.is_empty() {
+            bail!(
+                "CA bundle from {variable} ({}) contains no certificates",
+                path.display()
+            );
+        }
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
+    builder.build().context("Cannot initialize HTTPS client")
+}
+
+fn http_client(timeout: Duration) -> Result<Client> {
+    let ca_bundle = configured_ca_bundle();
+    http_client_with_ca_bundle(
+        timeout,
+        ca_bundle
+            .as_ref()
+            .map(|(variable, path)| (variable.as_str(), path.as_path())),
+    )
 }
 
 fn authenticated_request(
@@ -1592,6 +1644,107 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::generate_simple_self_signed;
+    use rustls::pki_types::PrivatePkcs8KeyDer;
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    fn ca_file(contents: &[u8]) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(contents).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    fn tls_server() -> (u16, Vec<u8>, thread::JoinHandle<()>) {
+        let certified = generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_pem = certified.cert.pem().into_bytes();
+        let certificates = vec![certified.cert.der().clone()];
+        let private_key = PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()).into();
+        let config = Arc::new(
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certificates, private_key)
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let connection = ServerConnection::new(config).unwrap();
+            let mut stream = StreamOwned::new(connection, stream);
+            let mut request = [0_u8; 2048];
+            if stream.read(&mut request).is_ok() {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+                let _ = stream.flush();
+            }
+        });
+        (port, certificate_pem, handle)
+    }
+
+    fn get_with_bundle(
+        host: &str,
+        port: u16,
+        bundle: &NamedTempFile,
+    ) -> Result<reqwest::blocking::Response> {
+        let client = http_client_with_ca_bundle(
+            Duration::from_secs(3),
+            Some(("TEST_CA_BUNDLE", bundle.path())),
+        )?;
+        client
+            .get(format!("https://{host}:{port}"))
+            .send()
+            .context("TLS request failed")
+    }
+
+    #[test]
+    fn selects_configured_ca_bundle_without_disabling_verification() {
+        let selected = configured_ca_bundle_with(|name| match name {
+            "SSL_CERT_FILE" => Some(OsString::from("/managed/ca.pem")),
+            "REQUESTS_CA_BUNDLE" => Some(OsString::from("/fallback/ca.pem")),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(selected.0, "SSL_CERT_FILE");
+        assert_eq!(selected.1, PathBuf::from("/managed/ca.pem"));
+
+        let fallback = configured_ca_bundle_with(|name| match name {
+            "SSL_CERT_FILE" => Some(OsString::new()),
+            "REQUESTS_CA_BUNDLE" => Some(OsString::from("/fallback/ca.pem")),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(fallback.0, "REQUESTS_CA_BUNDLE");
+    }
+
+    #[test]
+    fn accepts_a_configured_ca_bundle() {
+        let (port, certificate_pem, server) = tls_server();
+        let certificate = ca_file(&certificate_pem);
+        let response = get_with_bundle("localhost", port, &certificate).unwrap();
+        server.join().unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    #[test]
+    fn rejects_an_unrelated_ca_bundle() {
+        let (port, _, server) = tls_server();
+        let unrelated = generate_simple_self_signed(vec!["unrelated.test".to_owned()]).unwrap();
+        let certificate = ca_file(unrelated.cert.pem().as_bytes());
+        assert!(get_with_bundle("localhost", port, &certificate).is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_a_hostname_mismatch_with_the_configured_ca() {
+        let (port, certificate_pem, server) = tls_server();
+        let certificate = ca_file(&certificate_pem);
+        assert!(get_with_bundle("127.0.0.1", port, &certificate).is_err());
+        server.join().unwrap();
+    }
 
     #[test]
     fn validates_origins() {

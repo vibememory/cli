@@ -102,6 +102,7 @@ vibe-memory template feedback
 ## Security and updates
 
 - Remote service origins must use HTTPS.
+- HTTPS uses the operating system trust store. When a managed environment supplies an additional PEM CA bundle, the CLI loads `SSL_CERT_FILE` first and falls back to `REQUESTS_CA_BUNDLE`; certificate and hostname verification remain enabled.
 - HTTP redirects are disabled, so credentials are never forwarded to another origin.
 - Browser approval stores credentials with restrictive local permissions and never prints the key.
 - Vault access is an explicit per-agent permission. `vault list` never returns values, and the CLI has no command that prints one.

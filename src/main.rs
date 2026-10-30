@@ -281,6 +281,34 @@ enum Command {
     FeedbackList,
     /// Read a submitted feature request.
     FeedbackGet { id: String },
+    /// List all users' feature requests (approved operator agents only).
+    FeedbackAdminList {
+        #[arg(long, value_parser = ["received", "reviewing", "planned", "in_progress", "completed", "declined"])]
+        status: Option<String>,
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    /// Edit any user's feature request (approved operator agents only).
+    FeedbackAdminUpdate {
+        owner_id: String,
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        use_case: Option<String>,
+        #[arg(long, value_parser = ["low", "medium", "high"])]
+        priority: Option<String>,
+        #[arg(long, value_parser = ["received", "reviewing", "planned", "in_progress", "completed", "declined"])]
+        status: Option<String>,
+        #[arg(long)]
+        result: Option<String>,
+        #[arg(long)]
+        result_url: Option<String>,
+    },
     /// List addressable agents connected to this account.
     Agents,
     /// Exchange persistent messages with other connected agents.
@@ -1841,7 +1869,8 @@ fn run() -> Result<()> {
                     "connected": true,
                     "url": connection()?.base,
                     "user_id": me.get("user_id").cloned().unwrap_or(Value::Null),
-                    "vault_access": me.get("vault_access").cloned().unwrap_or(Value::Bool(false))
+                    "vault_access": me.get("vault_access").cloned().unwrap_or(Value::Bool(false)),
+                    "feature_request_operator": me.get("feature_request_operator").cloned().unwrap_or(Value::Bool(false))
                 }),
                 cli.pretty,
             );
@@ -2072,6 +2101,53 @@ fn run() -> Result<()> {
             &format!("/v1/feature-requests/{}", quote(&id)),
             None,
         )?,
+        Command::FeedbackAdminList {
+            status,
+            limit,
+            offset,
+        } => {
+            let mut endpoint = format!("/v1/admin/feature-requests?limit={limit}&offset={offset}");
+            if let Some(status) = status {
+                endpoint.push_str("&status=");
+                endpoint.push_str(&quote(&status));
+            }
+            call(Method::GET, &endpoint, None)?
+        }
+        Command::FeedbackAdminUpdate {
+            owner_id,
+            id,
+            title,
+            description,
+            use_case,
+            priority,
+            status,
+            result,
+            result_url,
+        } => {
+            let mut payload = serde_json::Map::new();
+            for (name, value) in [
+                ("title", title),
+                ("description", description),
+                ("use_case", use_case),
+                ("priority", priority),
+                ("status", status),
+                ("result", result),
+                ("result_url", result_url),
+            ] {
+                if let Some(value) = value {
+                    payload.insert(name.to_owned(), Value::String(value));
+                }
+            }
+            call(
+                Method::PATCH,
+                &format!(
+                    "/v1/admin/feature-requests/{}/{}",
+                    quote(&owner_id),
+                    quote(&id)
+                ),
+                Some(&Value::Object(payload)),
+            )?
+        }
         Command::Agents => call(Method::GET, "/v1/agents", None)?,
         Command::Message { command } => match command {
             MessageCommand::Send {
@@ -2499,6 +2575,53 @@ mod tests {
                 assert_eq!(extraction_version, "agent-v2");
             }
             _ => panic!("expected relate command"),
+        }
+    }
+
+    #[test]
+    fn parses_operator_feature_request_commands() {
+        let list = Cli::try_parse_from([
+            "vibe-memory",
+            "feedback-admin-list",
+            "--status",
+            "received",
+            "--limit",
+            "20",
+        ])
+        .unwrap();
+        match list.command {
+            Command::FeedbackAdminList { status, limit, .. } => {
+                assert_eq!(status.as_deref(), Some("received"));
+                assert_eq!(limit, 20);
+            }
+            _ => panic!("expected operator feedback list command"),
+        }
+
+        let update = Cli::try_parse_from([
+            "vibe-memory",
+            "feedback-admin-update",
+            "owner-id",
+            "request-id",
+            "--status",
+            "reviewing",
+            "--result",
+            "implementation started",
+        ])
+        .unwrap();
+        match update.command {
+            Command::FeedbackAdminUpdate {
+                owner_id,
+                id,
+                status,
+                result,
+                ..
+            } => {
+                assert_eq!(owner_id, "owner-id");
+                assert_eq!(id, "request-id");
+                assert_eq!(status.as_deref(), Some("reviewing"));
+                assert_eq!(result.as_deref(), Some("implementation started"));
+            }
+            _ => panic!("expected operator feedback update command"),
         }
     }
 

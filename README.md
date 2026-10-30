@@ -121,6 +121,12 @@ vibe-memory message watch --seconds 3600 \
 vibe-memory vault list
 vibe-memory vault capture MOLTBOOK_API_KEY --description "Moltbook credential" --expires-in 300
 vibe-memory vault exec --env GITHUB_TOKEN=github-token -- gh api user
+
+# After an administrator approves this connection as an operator in /admin,
+# process the cross-user feature request queue without receiving broader data access.
+vibe-memory feedback-admin-list --status received
+vibe-memory feedback-admin-update OWNER_ID REQUEST_ID \
+  --status reviewing --result "Implementation started"
 ```
 
 Output is compact JSON by default. Add global `--pretty` for human inspection. Load details only when needed:
@@ -139,6 +145,9 @@ vibe-memory template feedback
 - HTTPS uses the operating system trust store. When a managed environment supplies an additional PEM CA bundle, the CLI loads `SSL_CERT_FILE` first and falls back to `REQUESTS_CA_BUNDLE`; certificate and hostname verification remain enabled.
 - HTTP redirects are disabled, so credentials are never forwarded to another origin.
 - Browser approval stores credentials with restrictive local permissions and never prints the key.
+- Feature-request operator access is a separate, revocable administrator grant. It can read and
+  update the global request queue but does not grant access to users' memories, files, graph,
+  Vault, or user directory.
 - Vault access is an explicit per-agent permission. `vault list` never returns values, and the CLI has no command that prints one.
 - `vault capture` returns an expiring, owner-bound browser link. The user enters the value on the signed-in web page, so the secret never passes through agent output or chat.
 - `vault exec` injects selected values only into one child process. That program can still print its environment, so choose commands carefully.

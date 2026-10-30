@@ -780,7 +780,7 @@ fn call_with_timeout(
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("a newer release");
             bail!(
-                "This CLI is no longer supported; minimum version is {minimum}. Run check-update, review the result, then explicitly run sync or the verified bootstrap"
+                "This CLI is no longer supported; minimum version is {minimum}. Run check-update, review the result, then explicitly run the verified compatibility bootstrap"
             );
         }
         bail!("API returned HTTP {}", response.status().as_u16());
@@ -1200,6 +1200,7 @@ fn check_skill_update() -> Result<Value> {
         .as_ref()
         .map(|entry| entry.version.as_str())
         .unwrap_or("unknown");
+    let native_cli_update_available = latest_cli_version != env!("CARGO_PKG_VERSION");
     Ok(json!({
         "checked": true,
         "changed": false,
@@ -1208,10 +1209,17 @@ fn check_skill_update() -> Result<Value> {
         "skill_revision": revision,
         "skill_directory_detected": root.is_some(),
         "outdated_files": outdated_files,
-        "update_available": !outdated_files.is_empty() || latest_cli_version != env!("CARGO_PKG_VERSION"),
+        "update_available": !outdated_files.is_empty() || native_cli_update_available,
+        "native_cli_update_available": native_cli_update_available,
         "current_cli_version": env!("CARGO_PKG_VERSION"),
         "latest_cli_version": latest_cli_version,
-        "instruction": "Run explicit sync/bootstrap update only after reviewing this result"
+        "instruction": if native_cli_update_available {
+            "Run the verified compatibility bootstrap explicitly to replace the native binary, then reread SKILL.md"
+        } else if !outdated_files.is_empty() {
+            "Run explicit sync to refresh Skill files, then reread SKILL.md"
+        } else {
+            "No update action is needed"
+        }
     }))
 }
 

@@ -1223,6 +1223,20 @@ fn check_skill_update() -> Result<Value> {
     }))
 }
 
+fn graph_audit_request_body(
+    hub_threshold: u16,
+    relation: String,
+    include_untrusted: bool,
+    include_quarantined: bool,
+) -> Value {
+    json!({
+        "hub_threshold": hub_threshold,
+        "relation": relation,
+        "include_untrusted": include_untrusted,
+        "include_quarantined": include_quarantined
+    })
+}
+
 fn network_plan() -> Result<Value> {
     Ok(network_plan_for(connection()?))
 }
@@ -2538,12 +2552,12 @@ fn run() -> Result<()> {
         } => call(
             Method::POST,
             "/v1/graph/audit",
-            Some(&json!({
-                "hub_threshold": hub_threshold,
-                "relation": if relation.is_empty() { Value::Null } else { Value::String(relation) },
-                "include_untrusted": include_untrusted,
-                "include_quarantined": include_quarantined
-            })),
+            Some(&graph_audit_request_body(
+                hub_threshold,
+                relation,
+                include_untrusted,
+                include_quarantined,
+            )),
         )?,
         Command::GraphDiff { payload } => {
             call(Method::POST, "/v1/graph/diff", Some(&file_json(&payload)?))?
@@ -2792,6 +2806,10 @@ mod tests {
         };
         assert_eq!(hub_threshold, 12);
         assert_eq!(relation, "WORKS_ON");
+
+        let default_audit = graph_audit_request_body(20, String::new(), false, false);
+        assert_eq!(default_audit["relation"], "");
+        assert!(!default_audit["relation"].is_null());
 
         for (name, expected) in [("graph-diff", "diff.json"), ("graph-apply", "apply.json")] {
             let parsed = Cli::try_parse_from(["vibe-memory", name, expected]).unwrap();

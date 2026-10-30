@@ -22,6 +22,8 @@ use url::Url;
 
 const USER_AGENT: &str = concat!("VibeMemoryCLI/", env!("CARGO_PKG_VERSION"));
 const DEFAULT_ORIGIN: &str = "https://vibememory.io";
+const OFFICIAL_DISTRIBUTION_BASE: &str =
+    "https://github.com/vibememory/vibememory/releases/latest/download";
 const MAX_DISTRIBUTION_BYTES: u64 = 1024 * 1024;
 
 #[derive(Parser, Debug)]
@@ -490,6 +492,8 @@ struct Manifest {
     schema_version: u64,
     revision: String,
     files: BTreeMap<String, String>,
+    #[serde(default)]
+    release_assets: BTreeMap<String, String>,
 }
 
 fn default_poll_interval() -> u64 {
@@ -899,6 +903,67 @@ fn public_download(base: &str, path: &str, limit: u64) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+fn official_distribution_download(asset: &str, limit: u64) -> Result<Vec<u8>> {
+    if asset.is_empty()
+        || asset.contains('/')
+        || asset.contains('\\')
+        || !asset
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character))
+    {
+        bail!("Invalid official distribution asset name");
+    }
+    let mut url = Url::parse(&format!("{OFFICIAL_DISTRIBUTION_BASE}/{asset}"))?;
+    for _ in 0..5 {
+        let mut response = http_client(Duration::from_secs(30))?
+            .get(url.clone())
+            .header(CACHE_CONTROL, "no-cache")
+            .send()
+            .context("Official Skill distribution request failed")?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .context("Official distribution redirect omitted Location")?
+                .to_str()
+                .context("Official distribution redirect is not valid text")?;
+            let next = url
+                .join(location)
+                .context("Invalid official distribution redirect")?;
+            let host = next.host_str().unwrap_or_default();
+            let trusted = next.scheme() == "https"
+                && (host == "github.com"
+                    || host == "release-assets.githubusercontent.com"
+                    || host == "objects.githubusercontent.com");
+            if !trusted {
+                bail!("Official distribution redirected to an untrusted origin");
+            }
+            if host == "github.com"
+                && !next
+                    .path()
+                    .starts_with("/vibememory/vibememory/releases/download/")
+            {
+                bail!("Official distribution redirected outside the release repository");
+            }
+            url = next;
+            continue;
+        }
+        if !response.status().is_success() {
+            bail!(
+                "Official Skill distribution returned HTTP {}",
+                response.status().as_u16()
+            );
+        }
+        let mut data = Vec::new();
+        response.take(limit + 1).read_to_end(&mut data)?;
+        if data.len() as u64 > limit {
+            bail!("Skill distribution exceeds size limit");
+        }
+        return Ok(data);
+    }
+    bail!("Official distribution exceeded the redirect limit")
+}
+
 fn sha256(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
@@ -920,12 +985,14 @@ fn skill_root() -> Option<PathBuf> {
 
 fn sync_skill() -> Result<Value> {
     let base = connection()?.base;
-    let manifest: Manifest = serde_json::from_slice(&public_download(
-        &base,
-        "/skills/vibe-memory/manifest.json",
-        16_384,
-    )?)
-    .context("Invalid Skill manifest")?;
+    let official = base == DEFAULT_ORIGIN;
+    let manifest_bytes = if official {
+        official_distribution_download("manifest.json", 16_384)?
+    } else {
+        public_download(&base, "/skills/vibe-memory/manifest.json", 16_384)?
+    };
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).context("Invalid Skill manifest")?;
     let allowed = ["SKILL.md", "scripts/memory.py"];
     if manifest.schema_version != 1
         || manifest.files.len() != allowed.len()
@@ -939,10 +1006,23 @@ fn sync_skill() -> Result<Value> {
     if manifest.revision != revision {
         bail!("Invalid Skill revision");
     }
+    if official
+        && (manifest.release_assets.get("SKILL.md").map(String::as_str) != Some("SKILL.md")
+            || manifest
+                .release_assets
+                .get("scripts/memory.py")
+                .map(String::as_str)
+                != Some("memory.py"))
+    {
+        bail!("Official manifest does not contain the expected Skill release assets");
+    }
     let Some(root) = skill_root() else {
         return Ok(json!({
             "revision": revision,
             "updated": false,
+            "distribution_source": if official { OFFICIAL_DISTRIBUTION_BASE } else { base.as_str() },
+            "manifest_verified": true,
+            "skill_files_verified": false,
             "instruction": "Standalone CLI is current; no installed Skill directory detected"
         }));
     };
@@ -953,11 +1033,21 @@ fn sync_skill() -> Result<Value> {
         if target.is_file() && sha256(&fs::read(&target)?) == *expected {
             continue;
         }
-        let data = public_download(
-            &base,
-            &format!("/skills/vibe-memory/releases/{revision}/{name}"),
-            MAX_DISTRIBUTION_BYTES,
-        )?;
+        let data = if official {
+            official_distribution_download(
+                manifest
+                    .release_assets
+                    .get(name)
+                    .context("Official manifest is missing a Skill release asset")?,
+                MAX_DISTRIBUTION_BYTES,
+            )?
+        } else {
+            public_download(
+                &base,
+                &format!("/skills/vibe-memory/releases/{revision}/{name}"),
+                MAX_DISTRIBUTION_BYTES,
+            )?
+        };
         if sha256(&data) != *expected {
             bail!("Skill checksum mismatch; no files updated");
         }
@@ -969,6 +1059,9 @@ fn sync_skill() -> Result<Value> {
     Ok(json!({
         "revision": revision,
         "updated": !pending.is_empty(),
+        "distribution_source": if official { OFFICIAL_DISTRIBUTION_BASE } else { base.as_str() },
+        "manifest_verified": true,
+        "skill_files_verified": true,
         "instruction": if pending.is_empty() { "Skill is current" } else { "Read SKILL.md again before continuing" }
     }))
 }
@@ -1374,6 +1467,51 @@ fn compact_message(value: &Value) -> Option<String> {
     ))
 }
 
+fn is_session_checkpoint(value: &Value) -> bool {
+    value
+        .get("keywords")
+        .and_then(Value::as_array)
+        .is_some_and(|keywords| {
+            keywords.iter().any(|keyword| {
+                keyword
+                    .as_str()
+                    .is_some_and(|keyword| keyword.eq_ignore_ascii_case("session checkpoint"))
+            })
+        })
+}
+
+fn prioritized_hook_records(records: Vec<Value>, limit: usize) -> Vec<Value> {
+    let mut current_checkpoints = Vec::new();
+    let mut related_records = Vec::new();
+    let mut unresolved_checkpoints = Vec::new();
+    for record in records {
+        if !is_session_checkpoint(&record) {
+            related_records.push(record);
+            continue;
+        }
+        match record.get("correction_status").and_then(Value::as_str) {
+            Some("superseded") => {}
+            Some("current") => current_checkpoints.push(record),
+            _ => unresolved_checkpoints.push(record),
+        }
+    }
+    let newest_first = |left: &Value, right: &Value| {
+        right
+            .get("created_at")
+            .and_then(Value::as_str)
+            .cmp(&left.get("created_at").and_then(Value::as_str))
+    };
+    current_checkpoints.sort_by(newest_first);
+    unresolved_checkpoints.sort_by(newest_first);
+    current_checkpoints
+        .into_iter()
+        .take(1)
+        .chain(related_records)
+        .chain(unresolved_checkpoints)
+        .take(limit)
+        .collect()
+}
+
 fn hook_state_key(input: &Value, cwd: &Path) -> String {
     let session = input
         .get("session_id")
@@ -1491,7 +1629,7 @@ fn session_start_hook(input: &Value) -> Result<Option<Value>> {
             "keywords": [project, "session checkpoint"],
             "match_mode": "hybrid",
             "scope": "all",
-            "limit": 4
+            "limit": 12
         })),
         timeout,
     );
@@ -1505,13 +1643,16 @@ fn session_start_hook(input: &Value) -> Result<Option<Value>> {
     if search.is_err() && inbox.is_err() {
         return Err(anyhow!("Session recall and inbox check both failed"));
     }
-    let records = search
-        .ok()
-        .and_then(|value| value.get("hits").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(compact_record)
-        .collect::<Vec<_>>();
+    let records = prioritized_hook_records(
+        search
+            .ok()
+            .and_then(|value| value.get("hits").and_then(Value::as_array).cloned())
+            .unwrap_or_default(),
+        4,
+    )
+    .iter()
+    .filter_map(compact_record)
+    .collect::<Vec<_>>();
     let messages = inbox
         .ok()
         .and_then(|value| value.get("items").and_then(Value::as_array).cloned())
@@ -2553,6 +2694,38 @@ mod tests {
             value["hookSpecificOutput"]["additionalContext"],
             "checkpoint due"
         );
+    }
+
+    #[test]
+    fn session_start_prefers_current_checkpoint_and_drops_only_superseded_checkpoints() {
+        let records = vec![
+            json!({
+                "id": "old", "kind": "memory", "created_at": "2026-10-28T00:00:00Z",
+                "keywords": ["project", "session checkpoint"],
+                "correction_status": "superseded", "content": "old state"
+            }),
+            json!({
+                "id": "fact", "kind": "memory", "created_at": "2026-10-30T01:00:00Z",
+                "keywords": ["project", "decision"],
+                "correction_status": "current", "content": "accepted decision"
+            }),
+            json!({
+                "id": "conflict", "kind": "memory", "created_at": "2026-10-29T00:00:00Z",
+                "keywords": ["project", "session checkpoint"],
+                "correction_status": "conflict", "content": "competing checkpoint"
+            }),
+            json!({
+                "id": "latest", "kind": "memory", "created_at": "2026-10-30T02:00:00Z",
+                "keywords": ["project", "session checkpoint"],
+                "correction_status": "current", "content": "latest state"
+            }),
+        ];
+        let ranked = prioritized_hook_records(records, 4);
+        let ids = ranked
+            .iter()
+            .filter_map(|value| value.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["latest", "fact", "conflict"]);
     }
 
     #[test]

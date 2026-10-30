@@ -17,7 +17,7 @@ cargo install --locked --git https://github.com/vibememory/cli
 vibe-memory --help
 ```
 
-To use it inside a filesystem-based agent Skill, put the downloaded binary at `bin/vibe-memory` beside [`SKILL.md`](SKILL.md). The main Vibe Memory Skill archive reads the service release manifest and provides a small compatibility bootstrap that selects the platform asset, verifies SHA-256, and executes this Rust binary.
+To use it inside a filesystem-based agent Skill, put the downloaded binary at `bin/vibe-memory` beside [`SKILL.md`](SKILL.md). For the hosted service, the main Vibe Memory Skill archive reads the official GitHub Release manifest separately from the account API; an explicit self-hosted `MEMORY_URL` uses that deployment's same-origin manifest. The compatibility bootstrap selects the platform asset, verifies SHA-256, and executes this Rust binary.
 
 ## Connect in the browser
 
@@ -44,8 +44,11 @@ vibe-memory hook stop
 vibe-memory hook pre-compact
 ```
 
-Each command accepts the host's lifecycle JSON on stdin. `session-start` recalls
-at most four project/checkpoint records and four queued handoffs. `stop` emits one
+Each command accepts the host's lifecycle JSON on stdin. `session-start` fetches
+a bounded candidate set, excludes only session checkpoints explicitly marked
+`superseded`, puts the newest current checkpoint first, and retains conflicts,
+cycles, partial corrections, and unresolved claims among the four-record output.
+It also checks four queued handoffs. `stop` emits one
 checkpoint reminder when Git state changes or 20 minutes elapse, then suppresses
 the same reminder. `pre-compact` records a local marker so the following compacted
 session receives the reminder without blocking compaction. Failures are reported

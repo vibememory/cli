@@ -1,6 +1,6 @@
 [package]
 name = "vibe-memory-cli"
-version = "3.8.0"
+version = "3.9.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Token-efficient native CLI for Vibe Memory agents"

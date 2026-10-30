@@ -245,6 +245,23 @@ enum Command {
         )]
         include_quarantined: bool,
     },
+    /// Fetch a deterministic LLM-free handoff bundle from a JSON payload.
+    ContextBundle { payload: PathBuf },
+    /// Audit graph consistency without returning record content.
+    GraphAudit {
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(2..))]
+        hub_threshold: u16,
+        #[arg(long, default_value = "")]
+        relation: String,
+        #[arg(long)]
+        include_untrusted: bool,
+        #[arg(long)]
+        include_quarantined: bool,
+    },
+    /// Dry-run a desired-edge manifest from a JSON payload.
+    GraphDiff { payload: PathBuf },
+    /// Apply explicitly approved items from a graph diff JSON payload.
+    GraphApply { payload: PathBuf },
     /// List records.
     List {
         #[arg(long, value_parser = ["memory", "document", "entity", "file"])]
@@ -324,7 +341,7 @@ enum Command {
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback"])]
+        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.
@@ -348,6 +365,10 @@ enum Command {
     },
     /// Refresh installed Skill instructions.
     Sync,
+    /// Check the distribution manifest without changing local files.
+    CheckUpdate,
+    /// Show the exact service and distribution egress policy without making a request.
+    NetworkPlan,
     /// Connect through browser approval.
     Login {
         #[arg(long)]
@@ -522,6 +543,13 @@ struct Manifest {
     files: BTreeMap<String, String>,
     #[serde(default)]
     release_assets: BTreeMap<String, String>,
+    #[serde(default)]
+    native_cli: Option<NativeCliManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeCliManifest {
+    version: String,
 }
 
 fn default_poll_interval() -> u64 {
@@ -705,6 +733,16 @@ fn http_client(timeout: Duration) -> Result<Client> {
     )
 }
 
+fn service_http_client(timeout: Duration) -> Result<Client> {
+    http_client(timeout)
+}
+
+fn distribution_http_client(timeout: Duration) -> Result<Client> {
+    // Distribution requests are deliberately constructed without credentials, cookies,
+    // account payloads, or data-command request bodies.
+    http_client(timeout)
+}
+
 fn authenticated_request(
     connection: &Connection,
     method: Method,
@@ -714,7 +752,10 @@ fn authenticated_request(
     if connection.key.is_empty() {
         bail!("Run login, configure, or set MEMORY_API_KEY");
     }
-    Ok(http_client(timeout)?
+    if !path.starts_with('/') || path.starts_with("//") || path.contains("://") {
+        bail!("Service API path must be an origin-relative path");
+    }
+    Ok(service_http_client(timeout)?
         .request(method, format!("{}{}", connection.base, path))
         .header(AUTHORIZATION, format!("Bearer {}", connection.key)))
 }
@@ -732,6 +773,16 @@ fn call_with_timeout(
     }
     let mut response = request.send().context("API request failed")?;
     if !response.status().is_success() {
+        if response.status().as_u16() == 426 {
+            let minimum = response
+                .headers()
+                .get("Vibe-Memory-Minimum-CLI")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("a newer release");
+            bail!(
+                "This CLI is no longer supported; minimum version is {minimum}. Run check-update, review the result, then explicitly run sync or the verified bootstrap"
+            );
+        }
         bail!("API returned HTTP {}", response.status().as_u16());
     }
     let mut bytes = Vec::new();
@@ -762,7 +813,7 @@ fn post_public_with_key<T: for<'de> Deserialize<'de>>(
     body: &Value,
     key: Option<&str>,
 ) -> Result<T> {
-    let mut request = http_client(Duration::from_secs(20))?
+    let mut request = service_http_client(Duration::from_secs(20))?
         .post(format!("{base}{path}"))
         .json(body);
     if let Some(key) = key.filter(|value| !value.is_empty()) {
@@ -770,6 +821,16 @@ fn post_public_with_key<T: for<'de> Deserialize<'de>>(
     }
     let response = request.send().context("Connection request failed")?;
     if !response.status().is_success() {
+        if response.status().as_u16() == 426 {
+            let minimum = response
+                .headers()
+                .get("Vibe-Memory-Minimum-CLI")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("a newer release");
+            bail!(
+                "This CLI is no longer supported; minimum version is {minimum}. Run check-update, review the result, then explicitly install the verified update"
+            );
+        }
         let message = match response.status().as_u16() {
             403 => "Connection denied",
             410 => "Connection expired; rerun login or increase --approval-timeout",
@@ -915,7 +976,7 @@ fn configure() -> Result<()> {
 }
 
 fn public_download(base: &str, path: &str, limit: u64) -> Result<Vec<u8>> {
-    let response = http_client(Duration::from_secs(20))?
+    let response = distribution_http_client(Duration::from_secs(20))?
         .get(format!("{base}{path}"))
         .header(CACHE_CONTROL, "no-cache")
         .send()
@@ -943,7 +1004,7 @@ fn official_distribution_download(asset: &str, limit: u64) -> Result<Vec<u8>> {
     }
     let mut url = Url::parse(&format!("{OFFICIAL_DISTRIBUTION_BASE}/{asset}"))?;
     for _ in 0..5 {
-        let response = http_client(Duration::from_secs(30))?
+        let response = distribution_http_client(Duration::from_secs(30))?
             .get(url.clone())
             .header(CACHE_CONTROL, "no-cache")
             .send()
@@ -1091,6 +1152,97 @@ fn sync_skill() -> Result<Value> {
         "manifest_verified": true,
         "skill_files_verified": true,
         "instruction": if pending.is_empty() { "Skill is current" } else { "Read SKILL.md again before continuing" }
+    }))
+}
+
+fn check_skill_update() -> Result<Value> {
+    let base = connection()?.base;
+    let official = base == DEFAULT_ORIGIN;
+    let manifest_bytes = if official {
+        official_distribution_download("manifest.json", 16_384)?
+    } else {
+        public_download(&base, "/skills/vibe-memory/manifest.json", 16_384)?
+    };
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).context("Invalid Skill manifest")?;
+    let allowed = ["SKILL.md", "scripts/memory.py"];
+    if manifest.schema_version != 1
+        || manifest.files.len() != allowed.len()
+        || allowed
+            .iter()
+            .any(|name| !manifest.files.contains_key(*name))
+    {
+        bail!("Unsupported Skill manifest");
+    }
+    let revision = sha256(&serde_json::to_vec(&manifest.files)?);
+    if manifest.revision != revision {
+        bail!("Invalid Skill revision");
+    }
+    let root = skill_root();
+    let outdated_files = root
+        .as_ref()
+        .map(|root| {
+            allowed
+                .iter()
+                .filter(|name| {
+                    let target = root.join(name);
+                    !target.is_file()
+                        || fs::read(&target)
+                            .map(|data| sha256(&data) != manifest.files[**name])
+                            .unwrap_or(true)
+                })
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let latest_cli_version = manifest
+        .native_cli
+        .as_ref()
+        .map(|entry| entry.version.as_str())
+        .unwrap_or("unknown");
+    Ok(json!({
+        "checked": true,
+        "changed": false,
+        "distribution_origin": if official { OFFICIAL_DISTRIBUTION_BASE } else { base.as_str() },
+        "distribution_authenticated": false,
+        "skill_revision": revision,
+        "skill_directory_detected": root.is_some(),
+        "outdated_files": outdated_files,
+        "update_available": !outdated_files.is_empty() || latest_cli_version != env!("CARGO_PKG_VERSION"),
+        "current_cli_version": env!("CARGO_PKG_VERSION"),
+        "latest_cli_version": latest_cli_version,
+        "instruction": "Run explicit sync/bootstrap update only after reviewing this result"
+    }))
+}
+
+fn network_plan() -> Result<Value> {
+    let connection = connection()?;
+    let official = connection.base == DEFAULT_ORIGIN;
+    let service_origin = connection.base;
+    let distribution_origin = if official {
+        OFFICIAL_DISTRIBUTION_BASE.to_owned()
+    } else {
+        service_origin.clone()
+    };
+    Ok(json!({
+        "network_requested": false,
+        "service": {
+            "origin": service_origin,
+            "operations": ["login", "status", "recall", "read", "write", "graph", "messages", "feedback", "vault"],
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+            "authentication": "Bearer API key for connected account operations",
+            "credentials_forwarded_to_other_origins": false
+        },
+        "distribution": {
+            "origin": distribution_origin,
+            "operations": ["check-update", "sync"],
+            "methods": ["GET"],
+            "authentication": "none",
+            "cookies": false,
+            "request_body": false
+        },
+        "automatic_update_checks_on_data_commands": false,
+        "policy": "Data, message, login, and Vault commands use only the configured service origin. Distribution egress occurs only for explicit check-update or sync."
     }))
 }
 
@@ -1374,6 +1526,56 @@ fn template(kind: &str) -> Value {
             "extraction_method": "agent method",
             "extraction_version": "agent version"
         }),
+        "context-bundle" => json!({
+            "anchor_id": "optional anchor record ID",
+            "record_ids": [],
+            "kinds": [],
+            "tags": [],
+            "relations": [],
+            "created_after": null,
+            "updated_after": null,
+            "depth": 1,
+            "limit": 50,
+            "byte_limit": 65536,
+            "cursor": null,
+            "include_content": false,
+            "include_untrusted": false,
+            "include_quarantined": false
+        }),
+        "graph-diff" => json!({
+            "items": [{
+                "client_request_id": "stable-edge-id",
+                "source_id": "source record ID",
+                "target_id": "target record ID",
+                "relation": "RELATION_NAME",
+                "reason": "evidence-based reason",
+                "confidence": 0.8,
+                "evidence_record_ids": ["evidence record ID"],
+                "extraction_method": "agent method",
+                "extraction_version": "agent version"
+            }],
+            "scope_record_ids": ["source record ID", "target record ID"],
+            "include_retract_candidates": true
+        }),
+        "graph-apply" => json!({
+            "items": [{
+                "client_request_id": "stable-edge-id",
+                "source_id": "source record ID",
+                "target_id": "target record ID",
+                "relation": "RELATION_NAME",
+                "reason": "evidence-based reason",
+                "confidence": 0.8,
+                "evidence_record_ids": ["evidence record ID"],
+                "extraction_method": "agent method",
+                "extraction_version": "agent version"
+            }],
+            "scope_record_ids": ["source record ID", "target record ID"],
+            "include_retract_candidates": true,
+            "approved_diff_hash": "hash returned by graph-diff",
+            "approved_create_client_ids": ["stable-edge-id"],
+            "approved_retract_ids": [],
+            "reason": "explicitly reviewed manifest"
+        }),
         _ => json!({
             "title": "Feature title",
             "description": "Concrete missing capability",
@@ -1418,18 +1620,6 @@ fn normalize_legacy_arguments(arguments: Vec<OsString>) -> Vec<OsString> {
         replacement.iter().map(|value| OsString::from(*value)),
     );
     values
-}
-
-fn ensure_current_skill() -> Result<()> {
-    let update = sync_skill()?;
-    if update
-        .get("updated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        bail!("Skill updated. Read SKILL.md again, then retry; no data operation was sent");
-    }
-    Ok(())
 }
 
 const HOOK_CHECKPOINT_INTERVAL_SECONDS: u64 = 20 * 60;
@@ -1887,10 +2077,12 @@ fn run() -> Result<()> {
         _ => {}
     }
 
-    if matches!(cli.command, Command::Sync) {
-        return emit(&sync_skill()?, cli.pretty);
+    match &cli.command {
+        Command::Sync => return emit(&sync_skill()?, cli.pretty),
+        Command::CheckUpdate => return emit(&check_skill_update()?, cli.pretty),
+        Command::NetworkPlan => return emit(&network_plan()?, cli.pretty),
+        _ => {}
     }
-    ensure_current_skill()?;
     if let Command::Watch {
         seconds,
         after,
@@ -2322,6 +2514,32 @@ fn run() -> Result<()> {
             ),
             None,
         )?,
+        Command::ContextBundle { payload } => call(
+            Method::POST,
+            "/v1/context-bundle",
+            Some(&file_json(&payload)?),
+        )?,
+        Command::GraphAudit {
+            hub_threshold,
+            relation,
+            include_untrusted,
+            include_quarantined,
+        } => call(
+            Method::POST,
+            "/v1/graph/audit",
+            Some(&json!({
+                "hub_threshold": hub_threshold,
+                "relation": if relation.is_empty() { Value::Null } else { Value::String(relation) },
+                "include_untrusted": include_untrusted,
+                "include_quarantined": include_quarantined
+            })),
+        )?,
+        Command::GraphDiff { payload } => {
+            call(Method::POST, "/v1/graph/diff", Some(&file_json(&payload)?))?
+        }
+        Command::GraphApply { payload } => {
+            call(Method::POST, "/v1/graph/apply", Some(&file_json(&payload)?))?
+        }
         Command::Vault { command } => match command {
             VaultCommand::List => call(Method::GET, "/v1/vault", None)?,
             VaultCommand::Capture {
@@ -2341,6 +2559,8 @@ fn run() -> Result<()> {
         },
         Command::Watch { .. }
         | Command::Sync
+        | Command::CheckUpdate
+        | Command::NetworkPlan
         | Command::Login { .. }
         | Command::Configure
         | Command::Status
@@ -2513,6 +2733,80 @@ mod tests {
         assert_eq!(template("entity")["entity_type"], "Person");
         assert!(template("document")["metadata"].is_object());
         assert_eq!(template("relation")["evidence_coverage"], "selected");
+        assert_eq!(template("context-bundle")["include_content"], false);
+        assert!(template("graph-diff")["items"].is_array());
+        assert!(template("graph-apply")["approved_create_client_ids"].is_array());
+    }
+
+    #[test]
+    fn parses_deterministic_workflow_commands() {
+        let bundle = Cli::try_parse_from(["vibe-memory", "context-bundle", "bundle.json"]).unwrap();
+        assert!(matches!(bundle.command, Command::ContextBundle { .. }));
+
+        let audit = Cli::try_parse_from([
+            "vibe-memory",
+            "graph-audit",
+            "--hub-threshold",
+            "12",
+            "--relation",
+            "WORKS_ON",
+        ])
+        .unwrap();
+        let Command::GraphAudit {
+            hub_threshold,
+            relation,
+            ..
+        } = audit.command
+        else {
+            panic!("expected graph audit");
+        };
+        assert_eq!(hub_threshold, 12);
+        assert_eq!(relation, "WORKS_ON");
+
+        for (name, expected) in [("graph-diff", "diff.json"), ("graph-apply", "apply.json")] {
+            let parsed = Cli::try_parse_from(["vibe-memory", name, expected]).unwrap();
+            assert!(matches!(
+                parsed.command,
+                Command::GraphDiff { .. } | Command::GraphApply { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_explicit_update_and_network_commands() {
+        for command in ["check-update", "network-plan", "sync"] {
+            assert!(Cli::try_parse_from(["vibe-memory", command]).is_ok());
+        }
+    }
+
+    #[test]
+    fn service_request_paths_cannot_escape_the_configured_origin() {
+        let connection = Connection {
+            base: "https://memory.example".to_owned(),
+            key: "secret".to_owned(),
+        };
+        for path in [
+            "https://distribution.example/file",
+            "//distribution.example/file",
+            "v1/records",
+        ] {
+            assert!(
+                authenticated_request(&connection, Method::GET, path, Duration::from_secs(1))
+                    .is_err(),
+                "{path}"
+            );
+        }
+        let request = authenticated_request(
+            &connection,
+            Method::GET,
+            "/v1/records",
+            Duration::from_secs(1),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(request.url().as_str(), "https://memory.example/v1/records");
+        assert!(request.headers().contains_key(AUTHORIZATION));
     }
 
     #[test]

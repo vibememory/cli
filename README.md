@@ -2,7 +2,7 @@
 
 A native Rust client for the [Vibe Memory](https://github.com/vibememory/vibememory) agent Skill.
 
-It wraps browser authentication, memory and entity storage, keyword search, relationship management, persistent agent-to-agent messaging, raw byte-stream file transfer, encrypted Vault execution, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
+It wraps browser authentication, memory and entity storage, keyword search, deterministic context bundles, relationship audits and reviewed graph manifests, persistent agent-to-agent messaging, raw byte-stream file transfer, encrypted Vault execution, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
 
 The CLI does not call an LLM or analyze your data. Entity resolution, relationship inference, file analysis, and keyword extraction remain the connected agent's responsibility.
 
@@ -92,6 +92,17 @@ vibe-memory relate SOURCE_ID TARGET_ID \
 vibe-memory template relation > relation.json
 vibe-memory from-json relation relation.json
 
+# Fetch a stable, bounded handoff assembled without an LLM.
+vibe-memory template context-bundle > context-bundle.json
+vibe-memory context-bundle context-bundle.json
+
+# Audit graph metadata, review a dry-run, then apply only exact approved IDs.
+vibe-memory graph-audit --hub-threshold 20
+vibe-memory template graph-diff > graph-diff.json
+vibe-memory graph-diff graph-diff.json
+vibe-memory template graph-apply > graph-apply.json
+vibe-memory graph-apply graph-apply.json
+
 # Apply an agent-prepared, version-checked update, or archive and restore safely.
 vibe-memory update RECORD_ID update.json
 vibe-memory archive RECORD_ID --version 2 --reason "Merged duplicate"
@@ -127,6 +138,11 @@ vibe-memory vault exec --env GITHUB_TOKEN=github-token -- gh api user
 vibe-memory feedback-admin-list --status received
 vibe-memory feedback-admin-update OWNER_ID REQUEST_ID \
   --status reviewing --result "Implementation started"
+
+# Inspect the egress policy locally, or explicitly check/install updates.
+vibe-memory network-plan
+vibe-memory check-update
+vibe-memory sync
 ```
 
 Output is compact JSON by default. Add global `--pretty` for human inspection. Load details only when needed:
@@ -151,8 +167,12 @@ vibe-memory template feedback
 - Vault access is an explicit per-agent permission. `vault list` never returns values, and the CLI has no command that prints one.
 - `vault capture` returns an expiring, owner-bound browser link. The user enters the value on the signed-in web page, so the secret never passes through agent output or chat.
 - `vault exec` injects selected values only into one child process. That program can still print its environment, so choose commands carefully.
-- `vibe-memory sync` verifies Skill files from content-addressed paths with SHA-256 before replacing them.
-- Every data command checks the current Skill revision before sending a request.
+- Data, message, browser-login, and Vault commands contact only the configured service origin. They never perform an implicit distribution or update request.
+- `vibe-memory network-plan` performs no network request and reports the origins, methods, authentication, and purpose used by each command class.
+- `vibe-memory check-update` reads the unsigned public distribution manifest without changing local files or sending account credentials, cookies, or request bodies.
+- `vibe-memory sync` is the only Skill-file update command. It is always explicit and verifies content-addressed files with SHA-256 before replacing them.
+- Official hosted installs read update artifacts from GitHub Releases. Self-hosted installs read their manifest from the configured service origin. Neither path receives the service bearer token.
+- Protected service responses advertise the minimum native CLI version. A recognized unsupported CLI stops with HTTP 426 before data access and directs the agent to the separate check/install flow; it never silently mutates itself.
 - Release workflows publish native binaries and a `SHA256SUMS` file.
 
 Browser login stores configuration at:

@@ -1540,11 +1540,23 @@ fn hook_cwd(input: &Value) -> Result<PathBuf> {
     env::current_dir().context("Cannot determine hook working directory")
 }
 
-fn git_fingerprint(cwd: &Path) -> (String, bool) {
+struct GitSnapshot {
+    fingerprint: String,
+    dirty: bool,
+    branch: Option<String>,
+    commit: Option<String>,
+}
+
+fn git_snapshot(cwd: &Path) -> GitSnapshot {
     let head = ProcessCommand::new("git")
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "HEAD"])
+        .output();
+    let branch = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["branch", "--show-current"])
         .output();
     let status = ProcessCommand::new("git")
         .arg("-C")
@@ -1558,9 +1570,29 @@ fn git_fingerprint(cwd: &Path) -> (String, bool) {
             digest.update(cwd.as_os_str().as_encoded_bytes());
             digest.update(&head.stdout);
             digest.update(&status.stdout);
-            (format!("{:x}", digest.finalize()), dirty)
+            let commit = String::from_utf8_lossy(&head.stdout)
+                .trim()
+                .chars()
+                .take(12)
+                .collect::<String>();
+            let branch = branch
+                .ok()
+                .filter(|value| value.status.success())
+                .map(|value| clipped(&String::from_utf8_lossy(&value.stdout), 100))
+                .filter(|value| !value.is_empty());
+            GitSnapshot {
+                fingerprint: format!("{:x}", digest.finalize()),
+                dirty,
+                branch,
+                commit: (!commit.is_empty()).then_some(commit),
+            }
         }
-        _ => (sha256(cwd.as_os_str().as_encoded_bytes()), false),
+        _ => GitSnapshot {
+            fingerprint: sha256(cwd.as_os_str().as_encoded_bytes()),
+            dirty: false,
+            branch: None,
+            commit: None,
+        },
     }
 }
 
@@ -1595,6 +1627,7 @@ fn trim_hook_state(state: &mut HookState) {
 
 fn session_start_hook(input: &Value) -> Result<Option<Value>> {
     let cwd = hook_cwd(input)?;
+    let git = git_snapshot(&cwd);
     let key = hook_state_key(input, &cwd);
     let mut state = read_hook_state().unwrap_or_default();
     let resumed_after_compaction = state
@@ -1620,13 +1653,20 @@ fn session_start_hook(input: &Value) -> Result<Option<Value>> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("project");
+    let mut keywords = vec![project.to_owned(), "session checkpoint".to_owned()];
+    if let Some(branch) = &git.branch {
+        keywords.push(format!("branch {branch}"));
+    }
+    if let Some(commit) = &git.commit {
+        keywords.push(format!("commit {commit}"));
+    }
     let timeout = Duration::from_secs(4);
     let search = call_with_timeout(
         &credentials,
         Method::POST,
         "/v1/search",
         Some(&json!({
-            "keywords": [project, "session checkpoint"],
+            "keywords": keywords,
             "match_mode": "hybrid",
             "scope": "all",
             "limit": 12
@@ -1690,13 +1730,13 @@ fn stop_hook(input: &Value) -> Result<Option<Value>> {
     }
     let cwd = hook_cwd(input)?;
     let key = hook_state_key(input, &cwd);
-    let (fingerprint, dirty) = git_fingerprint(&cwd);
+    let git = git_snapshot(&cwd);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let mut state = read_hook_state().unwrap_or_default();
-    let due = checkpoint_due(state.sessions.get(&key), &fingerprint, dirty, now);
+    let due = checkpoint_due(state.sessions.get(&key), &git.fingerprint, git.dirty, now);
     let previous_prompt_at = state
         .sessions
         .get(&key)
@@ -1709,7 +1749,7 @@ fn stop_hook(input: &Value) -> Result<Option<Value>> {
     state.sessions.insert(
         key,
         HookCheckpoint {
-            fingerprint,
+            fingerprint: git.fingerprint,
             last_prompt_at: if due { now } else { previous_prompt_at },
             pre_compact,
         },
@@ -1719,17 +1759,21 @@ fn stop_hook(input: &Value) -> Result<Option<Value>> {
     if !due {
         return Ok(None);
     }
+    let branch = git.branch.as_deref().unwrap_or("unavailable");
+    let commit = git.commit.as_deref().unwrap_or("unavailable");
+    let worktree = if git.dirty { "dirty" } else { "clean" };
     Ok(Some(hook_context(
         "Stop",
-        "The workspace changed or the 20-minute checkpoint interval elapsed. If this turn created an unsaved durable decision, correction, verified milestone, blocker, or next action, save one concise Vibe Memory session checkpoint and relate it with SUPERSEDES to the previous checkpoint. If there is no durable delta, do nothing. Never save secrets, full transcripts, hidden reasoning, transient tool output, or speculation."
-            .to_owned(),
+        format!(
+            "The workspace changed or the 20-minute checkpoint interval elapsed. Local Git snapshot: branch {branch}, commit {commit}, working tree {worktree}. If this turn created an unsaved durable decision, correction, verified milestone, blocker, or next action, save one concise Vibe Memory session checkpoint; include the project, branch, commit and whether uncommitted changes remain, then relate it with SUPERSEDES to the previous checkpoint. Git cannot recover uncommitted content, so describe only the useful verified delta without copying file contents. If there is no durable delta, do nothing. Never save secrets, full transcripts, hidden reasoning, transient tool output, or speculation."
+        ),
     )))
 }
 
 fn pre_compact_hook(input: &Value) -> Result<Option<Value>> {
     let cwd = hook_cwd(input)?;
     let key = hook_state_key(input, &cwd);
-    let (fingerprint, _) = git_fingerprint(&cwd);
+    let fingerprint = git_snapshot(&cwd).fingerprint;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2682,6 +2726,48 @@ mod tests {
         assert!(!checkpoint_due(Some(&previous), "same", true, 1199));
         assert!(checkpoint_due(Some(&previous), "changed", false, 101));
         assert!(checkpoint_due(Some(&previous), "same", false, 1300));
+    }
+
+    #[test]
+    fn git_snapshot_reports_branch_commit_and_worktree_state() {
+        if ProcessCommand::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let run = |arguments: &[&str]| {
+            ProcessCommand::new("git")
+                .arg("-C")
+                .arg(directory.path())
+                .args(arguments)
+                .output()
+                .unwrap()
+        };
+        assert!(run(&["init"]).status.success());
+        assert!(
+            run(&["config", "user.email", "hooks@example.invalid"])
+                .status
+                .success()
+        );
+        assert!(run(&["config", "user.name", "Hook Test"]).status.success());
+        fs::write(directory.path().join("state.txt"), "first\n").unwrap();
+        assert!(run(&["add", "state.txt"]).status.success());
+        assert!(run(&["commit", "-m", "initial"]).status.success());
+
+        let clean = git_snapshot(directory.path());
+        assert!(!clean.dirty);
+        assert!(clean.branch.is_some());
+        assert_eq!(clean.commit.as_deref().map(str::len), Some(12));
+
+        fs::write(directory.path().join("state.txt"), "changed\n").unwrap();
+        let dirty = git_snapshot(directory.path());
+        assert!(dirty.dirty);
+        assert_ne!(dirty.fingerprint, clean.fingerprint);
+        assert_eq!(dirty.branch, clean.branch);
+        assert_eq!(dirty.commit, clean.commit);
     }
 
     #[test]

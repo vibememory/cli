@@ -48,9 +48,12 @@ Each command accepts the host's lifecycle JSON on stdin. `session-start` fetches
 a bounded candidate set, excludes only session checkpoints explicitly marked
 `superseded`, puts the newest current checkpoint first, and retains conflicts,
 cycles, partial corrections, and unresolved claims among the four-record output.
-It also checks four queued handoffs. `stop` emits one
-checkpoint reminder when Git state changes or 20 minutes elapse, then suppresses
-the same reminder. `pre-compact` records a local marker so the following compacted
+It also checks four queued handoffs and uses the local branch and abbreviated
+commit as additional search keywords when available. `stop` emits one checkpoint
+reminder with the local branch, abbreviated commit, and clean/dirty worktree state
+when Git state changes or 20 minutes elapse, then suppresses the same reminder.
+It never reads file contents, and explicitly warns that Git cannot recover
+uncommitted content. `pre-compact` records a local marker so the following compacted
 session receives the reminder without blocking compaction. Failures are reported
 to stderr and always exit successfully.
 

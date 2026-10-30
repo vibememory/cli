@@ -34,6 +34,28 @@ vibe-memory login --no-browser --name "Remote coding agent" --vault-access
 
 The user signs in and approves the named agent on the web. Vault use is a separately selected sensitive permission, and the CLI reports the permissions actually granted. Running `login --vault-access` while already connected upgrades that connection instead of creating another key. Approval links default to 300 seconds and can be set from 60–900 seconds with `--approval-timeout`. The CLI saves the resulting key locally without displaying it. Connect to a self-hosted deployment with `--url https://memory.example.com`.
 
+## Agent lifecycle hooks
+
+The official Claude Code plugin invokes three non-blocking commands:
+
+```sh
+vibe-memory hook session-start
+vibe-memory hook stop
+vibe-memory hook pre-compact
+```
+
+Each command accepts the host's lifecycle JSON on stdin. `session-start` recalls
+at most four project/checkpoint records and four queued handoffs. `stop` emits one
+checkpoint reminder when Git state changes or 20 minutes elapse, then suppresses
+the same reminder. `pre-compact` records a local marker so the following compacted
+session receives the reminder without blocking compaction. Failures are reported
+to stderr and always exit successfully.
+
+The hook state file is stored next to `client.json` and contains hashes,
+timestamps, and a boolean marker only—never credentials, transcripts, file
+contents, prompts, or environment variables. The CLI still performs no LLM work;
+the connected agent decides what is durable and writes any checkpoint.
+
 ## Common commands
 
 ```sh

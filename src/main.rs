@@ -1216,7 +1216,10 @@ fn check_skill_update() -> Result<Value> {
 }
 
 fn network_plan() -> Result<Value> {
-    let connection = connection()?;
+    Ok(network_plan_for(connection()?))
+}
+
+fn network_plan_for(connection: Connection) -> Value {
     let official = connection.base == DEFAULT_ORIGIN;
     let service_origin = connection.base;
     let distribution_origin = if official {
@@ -1224,7 +1227,7 @@ fn network_plan() -> Result<Value> {
     } else {
         service_origin.clone()
     };
-    Ok(json!({
+    json!({
         "network_requested": false,
         "service": {
             "origin": service_origin,
@@ -1243,7 +1246,7 @@ fn network_plan() -> Result<Value> {
         },
         "automatic_update_checks_on_data_commands": false,
         "policy": "Data, message, login, and Vault commands use only the configured service origin. Distribution egress occurs only for explicit check-update or sync."
-    }))
+    })
 }
 
 fn json_object(value: &str) -> Result<Value> {
@@ -2639,6 +2642,25 @@ mod tests {
         (port, certificate_pem, handle)
     }
 
+    fn json_server() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let count = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with("GET /v1/me HTTP/1.1"));
+            assert!(request.contains("authorization: Bearer local-key"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                )
+                .unwrap();
+        });
+        (format!("http://{address}"), handle)
+    }
+
     fn get_with_bundle(
         host: &str,
         port: u16,
@@ -2807,6 +2829,38 @@ mod tests {
         .unwrap();
         assert_eq!(request.url().as_str(), "https://memory.example/v1/records");
         assert!(request.headers().contains_key(AUTHORIZATION));
+    }
+
+    #[test]
+    fn ordinary_data_call_uses_only_the_configured_service() {
+        let (base, server) = json_server();
+        let connection = Connection {
+            base,
+            key: "local-key".to_owned(),
+        };
+        let response = call_with_timeout(
+            &connection,
+            Method::GET,
+            "/v1/me",
+            None,
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(response, json!({"ok": true}));
+    }
+
+    #[test]
+    fn network_plan_is_local_and_separates_service_from_distribution() {
+        let plan = network_plan_for(Connection {
+            base: DEFAULT_ORIGIN.to_owned(),
+            key: "unused".to_owned(),
+        });
+        assert_eq!(plan["network_requested"], false);
+        assert_eq!(plan["service"]["origin"], DEFAULT_ORIGIN);
+        assert_eq!(plan["distribution"]["origin"], OFFICIAL_DISTRIBUTION_BASE);
+        assert_eq!(plan["distribution"]["authentication"], "none");
+        assert_eq!(plan["automatic_update_checks_on_data_commands"], false);
     }
 
     #[test]

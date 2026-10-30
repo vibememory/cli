@@ -915,7 +915,7 @@ fn official_distribution_download(asset: &str, limit: u64) -> Result<Vec<u8>> {
     }
     let mut url = Url::parse(&format!("{OFFICIAL_DISTRIBUTION_BASE}/{asset}"))?;
     for _ in 0..5 {
-        let mut response = http_client(Duration::from_secs(30))?
+        let response = http_client(Duration::from_secs(30))?
             .get(url.clone())
             .header(CACHE_CONTROL, "no-cache")
             .send()

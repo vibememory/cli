@@ -22,7 +22,7 @@ To use it inside a filesystem-based agent Skill, put the downloaded binary at `b
 ## Connect in the browser
 
 ```sh
-vibe-memory login --name "My agent" --vault-access
+vibe-memory login --name "My agent" --vault-access --approval-timeout 600
 vibe-memory status
 ```
 
@@ -32,7 +32,7 @@ For a remote agent, keep the command running and send its generated approval lin
 vibe-memory login --no-browser --name "Remote coding agent" --vault-access
 ```
 
-The user signs in and approves the named agent on the web. Vault use is shown as a separate sensitive permission when requested. The CLI saves the resulting key locally without displaying it. Connect to a self-hosted deployment with `--url https://memory.example.com`.
+The user signs in and approves the named agent on the web. Vault use is a separately selected sensitive permission, and the CLI reports the permissions actually granted. Running `login --vault-access` while already connected upgrades that connection instead of creating another key. Approval links default to 300 seconds and can be set from 60–900 seconds with `--approval-timeout`. The CLI saves the resulting key locally without displaying it. Connect to a self-hosted deployment with `--url https://memory.example.com`.
 
 ## Common commands
 
@@ -59,6 +59,10 @@ vibe-memory relate SOURCE_ID TARGET_ID \
   --relation WORKS_ON --reason "Explicitly stated by the user" \
   --confidence 0.92 --evidence-id RECORD_ID \
   --extraction-method structured-output --extraction-version agent-v2
+
+# For version-pinned evidence, prepare the compact relation template and submit it.
+vibe-memory template relation > relation.json
+vibe-memory from-json relation relation.json
 
 # Apply an agent-prepared, version-checked update, or archive and restore safely.
 vibe-memory update RECORD_ID update.json

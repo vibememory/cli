@@ -288,13 +288,13 @@ enum Command {
     },
     /// Submit a fully prepared JSON object.
     FromJson {
-        #[arg(value_parser = ["memory", "entity", "document", "feedback"])]
+        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback"])]
         kind: String,
         payload: PathBuf,
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "entity", "document", "feedback"])]
+        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.
@@ -323,6 +323,13 @@ enum Command {
         no_browser: bool,
         #[arg(long, help = "Request explicit permission to use Vault secrets")]
         vault_access: bool,
+        #[arg(
+            long,
+            default_value_t = 300,
+            value_parser = clap::value_parser!(u16).range(60..=900),
+            help = "Seconds the browser approval link remains valid"
+        )]
+        approval_timeout: u16,
     },
     /// Fallback: save an existing API key interactively.
     Configure,
@@ -435,12 +442,18 @@ struct DeviceStart {
     expires_in: u64,
     #[serde(default = "default_poll_interval")]
     interval: u64,
+    #[serde(default)]
+    upgrade: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct DevicePoll {
     state: String,
     key: Option<String>,
+    #[serde(default)]
+    upgraded: bool,
+    #[serde(default)]
+    vault_access: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -665,16 +678,23 @@ fn call(method: Method, path: &str, body: Option<&Value>) -> Result<Value> {
     call_with(&connection()?, method, path, body)
 }
 
-fn post_public<T: for<'de> Deserialize<'de>>(base: &str, path: &str, body: &Value) -> Result<T> {
-    let response = http_client(Duration::from_secs(20))?
+fn post_public_with_key<T: for<'de> Deserialize<'de>>(
+    base: &str,
+    path: &str,
+    body: &Value,
+    key: Option<&str>,
+) -> Result<T> {
+    let mut request = http_client(Duration::from_secs(20))?
         .post(format!("{base}{path}"))
-        .json(body)
-        .send()
-        .context("Connection request failed")?;
+        .json(body);
+    if let Some(key) = key.filter(|value| !value.is_empty()) {
+        request = request.header(AUTHORIZATION, format!("Bearer {key}"));
+    }
+    let response = request.send().context("Connection request failed")?;
     if !response.status().is_success() {
         let message = match response.status().as_u16() {
             403 => "Connection denied",
-            410 => "Connection expired; run login again",
+            410 => "Connection expired; rerun login or increase --approval-timeout",
             422 => "Cannot create a key; check the console key limit",
             429 => "Too many requests; wait before retrying",
             code => return Err(anyhow!("Login returned HTTP {code}")),
@@ -684,12 +704,31 @@ fn post_public<T: for<'de> Deserialize<'de>>(base: &str, path: &str, body: &Valu
     response.json().context("Login returned invalid JSON")
 }
 
-fn browser_login(base: &str, name: &str, no_browser: bool, vault_access: bool) -> Result<()> {
+fn post_public<T: for<'de> Deserialize<'de>>(base: &str, path: &str, body: &Value) -> Result<T> {
+    post_public_with_key(base, path, body, None)
+}
+
+fn browser_login(
+    base: &str,
+    name: &str,
+    no_browser: bool,
+    vault_access: bool,
+    approval_timeout: u16,
+) -> Result<()> {
     let base = validate_origin(base)?;
-    let pending: DeviceStart = post_public(
+    let current = connection()?;
+    let upgrade_key = (vault_access && current.base == base && !current.key.is_empty())
+        .then_some(current.key.as_str());
+    let pending: DeviceStart = post_public_with_key(
         &base,
         "/auth/device/start",
-        &json!({"name": name, "vault_access": vault_access}),
+        &json!({
+            "name": name,
+            "vault_access": vault_access,
+            "expires_in": approval_timeout,
+            "upgrade": upgrade_key.is_some()
+        }),
+        upgrade_key,
     )?;
     if pending.user_code.len() != 10
         || !pending
@@ -700,13 +739,21 @@ fn browser_login(base: &str, name: &str, no_browser: bool, vault_access: bool) -
         bail!("Invalid verification code");
     }
     let approval_url = format!("{base}/connect?code={}", pending.user_code);
-    println!("Approve this agent in your browser: {approval_url}");
-    println!("Confirm code: {} (expires in 5 minutes)", pending.user_code);
+    let action = if pending.upgrade {
+        "Approve the Vault permission change"
+    } else {
+        "Approve this agent"
+    };
+    println!("{action} in your browser: {approval_url}");
+    println!(
+        "Confirm code: {} (expires in {} seconds; Vault requested: {})",
+        pending.user_code, pending.expires_in, vault_access
+    );
     io::stdout().flush()?;
     if !no_browser {
         let _ = webbrowser::open(&approval_url);
     }
-    let deadline = Instant::now() + Duration::from_secs(pending.expires_in.min(300));
+    let deadline = Instant::now() + Duration::from_secs(pending.expires_in);
     let interval = pending.interval.clamp(3, 10);
     while Instant::now() < deadline {
         thread::sleep(Duration::from_secs(interval));
@@ -717,23 +764,39 @@ fn browser_login(base: &str, name: &str, no_browser: bool, vault_access: bool) -
         )?;
         match result.state.as_str() {
             "connected" => {
-                let key = result
-                    .key
-                    .context("Connected response did not include a key")?;
+                let key = if result.upgraded {
+                    current.key.clone()
+                } else {
+                    result
+                        .key
+                        .context("Connected response did not include a key")?
+                };
                 let credentials = Connection {
                     base: base.clone(),
                     key: key.clone(),
                 };
-                call_with(&credentials, Method::GET, "/v1/me", None)?;
+                let me = call_with(&credentials, Method::GET, "/v1/me", None)?;
+                let granted = me
+                    .get("vault_access")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(result.vault_access);
                 save_credentials(&base, &key)?;
-                println!("Connected. Credentials saved locally; no API key was displayed.");
+                println!(
+                    "Connected. Permissions: memory=granted, vault={}. Credentials saved locally; no API key was displayed.",
+                    if granted { "granted" } else { "not granted" }
+                );
+                if vault_access && !granted {
+                    println!(
+                        "Vault was requested but not granted. The user may have cleared that permission; check the console or run login --vault-access again."
+                    );
+                }
                 return Ok(());
             }
             "pending" => {}
             _ => bail!("Unexpected login state"),
         }
     }
-    bail!("Connection expired; run login again")
+    bail!("Connection expired; rerun login or increase --approval-timeout")
 }
 
 fn configure() -> Result<()> {
@@ -1124,6 +1187,26 @@ fn template(kind: &str) -> Value {
             "metadata": {"summary": "agent-authored summary", "mime_type": "text/plain"},
             "provenance": {"source_type": "agent-authored"}
         }),
+        "relation" => json!({
+            "source_id": "source record ID",
+            "target_id": "target record ID",
+            "relation": "RELATION_NAME",
+            "reason": "concise evidence-based reason",
+            "confidence": 0.8,
+            "evidence": [{
+                "record_id": "evidence record ID",
+                "version": 1,
+                "content_hash": "64-character SHA-256 from get",
+                "observed_at": "2026-10-30T00:00:00Z",
+                "location": "optional page, section, or selector",
+                "range_start": 0,
+                "range_end": 10
+            }],
+            "evidence_coverage": "selected",
+            "input_manifest_id": "optional normal record ID",
+            "extraction_method": "agent method",
+            "extraction_version": "agent version"
+        }),
         _ => json!({
             "title": "Feature title",
             "description": "Concrete missing capability",
@@ -1190,9 +1273,10 @@ fn run() -> Result<()> {
             name,
             no_browser,
             vault_access,
+            approval_timeout,
         } => {
             let base = url.clone().unwrap_or(connection()?.base);
-            return browser_login(&base, name, *no_browser, *vault_access);
+            return browser_login(&base, name, *no_browser, *vault_access, *approval_timeout);
         }
         Command::Configure => return configure(),
         Command::Status => {
@@ -1497,6 +1581,7 @@ fn run() -> Result<()> {
                 "memory" => "/v1/memories",
                 "entity" => "/v1/entities",
                 "document" => "/v1/documents",
+                "relation" => "/v1/relations",
                 _ => "/v1/feature-requests",
             };
             call(Method::POST, path, Some(&file_json(&payload)?))?
@@ -1794,6 +1879,30 @@ mod tests {
     fn templates_are_objects() {
         assert_eq!(template("entity")["entity_type"], "Person");
         assert!(template("document")["metadata"].is_object());
+        assert_eq!(template("relation")["evidence_coverage"], "selected");
+    }
+
+    #[test]
+    fn parses_login_approval_timeout() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "login",
+            "--vault-access",
+            "--approval-timeout",
+            "600",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Login {
+                vault_access,
+                approval_timeout,
+                ..
+            } => {
+                assert!(vault_access);
+                assert_eq!(approval_timeout, 600);
+            }
+            _ => panic!("expected login command"),
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1084,6 +1084,61 @@ fn skill_root() -> Option<PathBuf> {
         .filter(|path| path.join("SKILL.md").is_file())
 }
 
+fn validated_skill_files(manifest: &Manifest, official: bool) -> Result<Vec<String>> {
+    let required = ["SKILL.md", "scripts/memory.py"];
+    let names = manifest.files.keys().cloned().collect::<Vec<_>>();
+    let valid_v1 = manifest.schema_version == 1
+        && names.len() == required.len()
+        && required
+            .iter()
+            .all(|name| manifest.files.contains_key(*name));
+    let valid_v2 = manifest.schema_version == 2
+        && names.len() > required.len()
+        && names.len() <= 64
+        && required
+            .iter()
+            .all(|name| manifest.files.contains_key(*name))
+        && names.iter().any(|name| name.starts_with("references/"))
+        && names.iter().all(|name| {
+            required.contains(&name.as_str())
+                || (name.starts_with("references/")
+                    && name.ends_with(".md")
+                    && Path::new(name)
+                        .components()
+                        .all(|part| matches!(part, Component::Normal(_)))
+                    && Path::new(name).components().count() == 2)
+        });
+    if !valid_v1 && !valid_v2 {
+        bail!("Unsupported Skill manifest");
+    }
+    if manifest.files.values().any(|digest| {
+        digest.len() != 64
+            || !digest
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    }) {
+        bail!("Invalid Skill file checksum");
+    }
+    if official {
+        if manifest.release_assets.len() != names.len()
+            || names.iter().any(|name| {
+                let Some(asset) = manifest.release_assets.get(name) else {
+                    return true;
+                };
+                asset.is_empty()
+                    || asset.contains('/')
+                    || asset.contains('\\')
+                    || !asset.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || ".-_".contains(character)
+                    })
+            })
+        {
+            bail!("Official manifest does not contain the expected Skill release assets");
+        }
+    }
+    Ok(names)
+}
+
 fn sync_skill() -> Result<Value> {
     let base = connection()?.base;
     let official = base == DEFAULT_ORIGIN;
@@ -1094,28 +1149,10 @@ fn sync_skill() -> Result<Value> {
     };
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("Invalid Skill manifest")?;
-    let allowed = ["SKILL.md", "scripts/memory.py"];
-    if manifest.schema_version != 1
-        || manifest.files.len() != allowed.len()
-        || allowed
-            .iter()
-            .any(|name| !manifest.files.contains_key(*name))
-    {
-        bail!("Unsupported Skill manifest");
-    }
+    let files = validated_skill_files(&manifest, official)?;
     let revision = sha256(&serde_json::to_vec(&manifest.files)?);
     if manifest.revision != revision {
         bail!("Invalid Skill revision");
-    }
-    if official
-        && (manifest.release_assets.get("SKILL.md").map(String::as_str) != Some("SKILL.md")
-            || manifest
-                .release_assets
-                .get("scripts/memory.py")
-                .map(String::as_str)
-                != Some("memory.py"))
-    {
-        bail!("Official manifest does not contain the expected Skill release assets");
     }
     let Some(root) = skill_root() else {
         return Ok(json!({
@@ -1128,9 +1165,9 @@ fn sync_skill() -> Result<Value> {
         }));
     };
     let mut pending = Vec::new();
-    for name in allowed {
-        let expected = &manifest.files[name];
-        let target = root.join(name);
+    for name in files {
+        let expected = &manifest.files[&name];
+        let target = root.join(&name);
         if target.is_file() && sha256(&fs::read(&target)?) == *expected {
             continue;
         }
@@ -1138,7 +1175,7 @@ fn sync_skill() -> Result<Value> {
             official_distribution_download(
                 manifest
                     .release_assets
-                    .get(name)
+                    .get(&name)
                     .context("Official manifest is missing a Skill release asset")?,
                 MAX_DISTRIBUTION_BYTES,
             )?
@@ -1177,15 +1214,7 @@ fn check_skill_update() -> Result<Value> {
     };
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("Invalid Skill manifest")?;
-    let allowed = ["SKILL.md", "scripts/memory.py"];
-    if manifest.schema_version != 1
-        || manifest.files.len() != allowed.len()
-        || allowed
-            .iter()
-            .any(|name| !manifest.files.contains_key(*name))
-    {
-        bail!("Unsupported Skill manifest");
-    }
+    let files = validated_skill_files(&manifest, official)?;
     let revision = sha256(&serde_json::to_vec(&manifest.files)?);
     if manifest.revision != revision {
         bail!("Invalid Skill revision");
@@ -1194,16 +1223,16 @@ fn check_skill_update() -> Result<Value> {
     let outdated_files = root
         .as_ref()
         .map(|root| {
-            allowed
+            files
                 .iter()
                 .filter(|name| {
                     let target = root.join(name);
                     !target.is_file()
                         || fs::read(&target)
-                            .map(|data| sha256(&data) != manifest.files[**name])
+                            .map(|data| sha256(&data) != manifest.files[*name])
                             .unwrap_or(true)
                 })
-                .copied()
+                .cloned()
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -2856,6 +2885,39 @@ mod tests {
         for command in ["check-update", "network-plan", "sync"] {
             assert!(Cli::try_parse_from(["vibe-memory", command]).is_ok());
         }
+    }
+
+    #[test]
+    fn progressive_skill_manifest_accepts_safe_references_and_rejects_traversal() {
+        let digest = "a".repeat(64);
+        let manifest = Manifest {
+            schema_version: 2,
+            revision: String::new(),
+            files: BTreeMap::from([
+                ("SKILL.md".to_owned(), digest.clone()),
+                ("scripts/memory.py".to_owned(), digest.clone()),
+                ("references/vault.md".to_owned(), digest.clone()),
+            ]),
+            release_assets: BTreeMap::from([
+                ("SKILL.md".to_owned(), "SKILL.md".to_owned()),
+                ("scripts/memory.py".to_owned(), "memory.py".to_owned()),
+                (
+                    "references/vault.md".to_owned(),
+                    "reference-vault.md".to_owned(),
+                ),
+            ]),
+            native_cli: None,
+        };
+        assert_eq!(validated_skill_files(&manifest, true).unwrap().len(), 3);
+
+        let mut invalid = manifest;
+        invalid
+            .files
+            .insert("references/../secret.md".to_owned(), digest);
+        invalid
+            .release_assets
+            .insert("references/../secret.md".to_owned(), "secret.md".to_owned());
+        assert!(validated_skill_files(&invalid, true).is_err());
     }
 
     #[test]

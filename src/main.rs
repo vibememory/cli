@@ -152,12 +152,24 @@ enum Command {
         extraction_method: String,
         #[arg(long, default_value = "")]
         extraction_version: String,
+        #[arg(long, default_value = "unknown", value_parser = ["unknown", "full", "partial"])]
+        correction_scope: String,
     },
     /// Retract or restore a relationship.
     RelationStatus {
         id: String,
         #[arg(long, value_parser = ["active", "retracted"])]
         status: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        version: u64,
+    },
+    /// Version-check and change the correction scope of an existing relationship.
+    RelationScope {
+        id: String,
+        #[arg(long, value_parser = ["unknown", "full", "partial"])]
+        scope: String,
         #[arg(long)]
         reason: String,
         #[arg(long)]
@@ -1549,7 +1561,8 @@ fn template(kind: &str) -> Value {
             "evidence_coverage": "selected",
             "input_manifest_id": "optional normal record ID",
             "extraction_method": "agent method",
-            "extraction_version": "agent version"
+            "extraction_version": "agent version",
+            "correction_scope": "unknown"
         }),
         "context-bundle" => json!({
             "anchor_id": "optional anchor record ID",
@@ -1577,7 +1590,8 @@ fn template(kind: &str) -> Value {
                 "confidence": 0.8,
                 "evidence_record_ids": ["evidence record ID"],
                 "extraction_method": "agent method",
-                "extraction_version": "agent version"
+                "extraction_version": "agent version",
+                "correction_scope": "unknown"
             }],
             "scope_record_ids": ["source record ID", "target record ID"],
             "include_retract_candidates": true
@@ -1592,7 +1606,8 @@ fn template(kind: &str) -> Value {
                 "confidence": 0.8,
                 "evidence_record_ids": ["evidence record ID"],
                 "extraction_method": "agent method",
-                "extraction_version": "agent version"
+                "extraction_version": "agent version",
+                "correction_scope": "unknown"
             }],
             "scope_record_ids": ["source record ID", "target record ID"],
             "include_retract_candidates": true,
@@ -2258,6 +2273,7 @@ fn run() -> Result<()> {
             evidence_record_ids,
             extraction_method,
             extraction_version,
+            correction_scope,
         } => call(
             Method::POST,
             "/v1/relations",
@@ -2269,7 +2285,8 @@ fn run() -> Result<()> {
                 "confidence": confidence,
                 "evidence_record_ids": evidence_record_ids,
                 "extraction_method": extraction_method,
-                "extraction_version": extraction_version
+                "extraction_version": extraction_version,
+                "correction_scope": correction_scope
             })),
         )?,
         Command::RelationStatus {
@@ -2282,6 +2299,20 @@ fn run() -> Result<()> {
             &format!("/v1/relations/{}", quote(&id)),
             Some(&json!({
                 "status": status,
+                "reason": reason,
+                "expected_version": version
+            })),
+        )?,
+        Command::RelationScope {
+            id,
+            scope,
+            reason,
+            version,
+        } => call(
+            Method::PATCH,
+            &format!("/v1/relations/{}", quote(&id)),
+            Some(&json!({
+                "correction_scope": scope,
                 "reason": reason,
                 "expected_version": version
             })),
@@ -2933,6 +2964,8 @@ mod tests {
             "structured-output",
             "--extraction-version",
             "agent-v2",
+            "--correction-scope",
+            "partial",
         ])
         .unwrap();
         match cli.command {
@@ -2941,15 +2974,52 @@ mod tests {
                 evidence_record_ids,
                 extraction_method,
                 extraction_version,
+                correction_scope,
                 ..
             } => {
                 assert_eq!(confidence, Some(0.82));
                 assert_eq!(evidence_record_ids, ["record-a", "record-b"]);
                 assert_eq!(extraction_method, "structured-output");
                 assert_eq!(extraction_version, "agent-v2");
+                assert_eq!(correction_scope, "partial");
             }
             _ => panic!("expected relate command"),
         }
+    }
+
+    #[test]
+    fn parses_versioned_relation_scope_update() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "relation-scope",
+            "relation-id",
+            "--scope",
+            "full",
+            "--version",
+            "3",
+            "--reason",
+            "reviewed complete replacement",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::RelationScope {
+                id,
+                scope,
+                version,
+                reason,
+            } => {
+                assert_eq!(id, "relation-id");
+                assert_eq!(scope, "full");
+                assert_eq!(version, 3);
+                assert_eq!(reason, "reviewed complete replacement");
+            }
+            _ => panic!("expected relation-scope command"),
+        }
+        assert_eq!(template("relation")["correction_scope"], "unknown");
+        assert_eq!(
+            template("graph-apply")["items"][0]["correction_scope"],
+            "unknown"
+        );
     }
 
     #[test]

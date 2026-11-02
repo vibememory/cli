@@ -88,6 +88,15 @@ vibe-memory relate SOURCE_ID TARGET_ID \
   --confidence 0.92 --evidence-id RECORD_ID \
   --extraction-method structured-output --extraction-version agent-v2
 
+# For SUPERSEDES/CORRECTS claims, state whether the old record is fully or partially replaced.
+vibe-memory relate NEW_ID OLD_ID \
+  --relation SUPERSEDES --reason "New checkpoint replaces the old state" \
+  --correction-scope full
+
+# Correct a legacy relationship whose scope was previously unknown.
+vibe-memory relation-scope RELATION_ID \
+  --scope full --version 1 --reason "Reviewed as a complete replacement"
+
 # For version-pinned evidence, prepare the compact relation template and submit it.
 vibe-memory template relation > relation.json
 vibe-memory from-json relation relation.json

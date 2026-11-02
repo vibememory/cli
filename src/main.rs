@@ -1119,8 +1119,8 @@ fn validated_skill_files(manifest: &Manifest, official: bool) -> Result<Vec<Stri
     }) {
         bail!("Invalid Skill file checksum");
     }
-    if official {
-        if manifest.release_assets.len() != names.len()
+    if official
+        && (manifest.release_assets.len() != names.len()
             || names.iter().any(|name| {
                 let Some(asset) = manifest.release_assets.get(name) else {
                     return true;
@@ -1131,10 +1131,9 @@ fn validated_skill_files(manifest: &Manifest, official: bool) -> Result<Vec<Stri
                     || !asset.chars().all(|character| {
                         character.is_ascii_alphanumeric() || ".-_".contains(character)
                     })
-            })
-        {
-            bail!("Official manifest does not contain the expected Skill release assets");
-        }
+            }))
+    {
+        bail!("Official manifest does not contain the expected Skill release assets");
     }
     Ok(names)
 }

@@ -378,7 +378,7 @@ enum Command {
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply"])]
+        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.

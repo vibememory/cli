@@ -191,6 +191,7 @@ vibe-memory template feedback
 - `vibe-memory network-plan` performs no network request and reports the origins, methods, authentication, and purpose used by each command class.
 - `vibe-memory check-update` reads the unsigned public distribution manifest without changing local files or sending account credentials, cookies, or request bodies.
 - `vibe-memory sync` is the Skill-file update command. It is always explicit and verifies content-addressed files with SHA-256 before replacing them. When `check-update` reports a newer native CLI, rerun the verified compatibility bootstrap so the executable itself can be safely replaced.
+- Update checks prefer the progressive `manifest-v2.json` format and fall back to the two-file v1 manifest on older self-hosted releases. Official releases retain the v1 manifest so pre-3.11 CLIs can install a verified recovery Skill and bootstrap instead of becoming stranded by a manifest format change.
 - Official hosted installs read update artifacts from GitHub Releases. Self-hosted installs read their manifest from the configured service origin. Neither path receives the service bearer token.
 - Protected service responses advertise the minimum native CLI version. A recognized unsupported CLI stops with HTTP 426 before data access and directs the agent to the separate check/install flow; it never silently mutates itself.
 - Release workflows publish native binaries and a `SHA256SUMS` file.

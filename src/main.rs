@@ -1090,6 +1090,38 @@ fn official_distribution_download(asset: &str, limit: u64) -> Result<Vec<u8>> {
     bail!("Official distribution exceeded the redirect limit")
 }
 
+fn skill_manifest_candidates(official: bool) -> [&'static str; 2] {
+    if official {
+        ["manifest-v2.json", "manifest.json"]
+    } else {
+        [
+            "/skills/vibe-memory/manifest-v2.json",
+            "/skills/vibe-memory/manifest.json",
+        ]
+    }
+}
+
+fn skill_manifest_download(base: &str, official: bool) -> Result<Vec<u8>> {
+    let candidates = skill_manifest_candidates(official);
+    let preferred = if official {
+        official_distribution_download(candidates[0], 16_384)
+    } else {
+        public_download(base, candidates[0], 16_384)
+    };
+    preferred.or_else(|preferred_error| {
+        let legacy = if official {
+            official_distribution_download(candidates[1], 16_384)
+        } else {
+            public_download(base, candidates[1], 16_384)
+        };
+        legacy.with_context(|| {
+            format!(
+                "Skill manifest v2 and compatibility fallback both failed; v2 error: {preferred_error:#}"
+            )
+        })
+    })
+}
+
 fn sha256(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
@@ -1166,11 +1198,7 @@ fn validated_skill_files(manifest: &Manifest, official: bool) -> Result<Vec<Stri
 fn sync_skill() -> Result<Value> {
     let base = connection()?.base;
     let official = base == DEFAULT_ORIGIN;
-    let manifest_bytes = if official {
-        official_distribution_download("manifest.json", 16_384)?
-    } else {
-        public_download(&base, "/skills/vibe-memory/manifest.json", 16_384)?
-    };
+    let manifest_bytes = skill_manifest_download(&base, official)?;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("Invalid Skill manifest")?;
     let files = validated_skill_files(&manifest, official)?;
@@ -1231,11 +1259,7 @@ fn sync_skill() -> Result<Value> {
 fn check_skill_update() -> Result<Value> {
     let base = connection()?.base;
     let official = base == DEFAULT_ORIGIN;
-    let manifest_bytes = if official {
-        official_distribution_download("manifest.json", 16_384)?
-    } else {
-        public_download(&base, "/skills/vibe-memory/manifest.json", 16_384)?
-    };
+    let manifest_bytes = skill_manifest_download(&base, official)?;
     let manifest: Manifest =
         serde_json::from_slice(&manifest_bytes).context("Invalid Skill manifest")?;
     let files = validated_skill_files(&manifest, official)?;
@@ -2987,6 +3011,21 @@ mod tests {
         for command in ["check-update", "network-plan", "sync"] {
             assert!(Cli::try_parse_from(["vibe-memory", command]).is_ok());
         }
+    }
+
+    #[test]
+    fn progressive_manifest_precedes_the_legacy_recovery_manifest() {
+        assert_eq!(
+            skill_manifest_candidates(true),
+            ["manifest-v2.json", "manifest.json"]
+        );
+        assert_eq!(
+            skill_manifest_candidates(false),
+            [
+                "/skills/vibe-memory/manifest-v2.json",
+                "/skills/vibe-memory/manifest.json"
+            ]
+        );
     }
 
     #[test]

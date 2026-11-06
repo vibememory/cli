@@ -38,4 +38,17 @@ fn keeps_legacy_commands_out_of_help() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("recall"));
     assert!(!stdout.contains("request-feature"));
+    assert!(stdout.contains("maintenance-audit"));
+    assert!(stdout.contains("agent-memory-export"));
+}
+
+#[test]
+fn emits_agent_memory_repo_templates() {
+    for kind in ["agent-memory-diff", "agent-memory-apply"] {
+        let output = cli().args(["template", kind]).output().unwrap();
+        assert_success(&output);
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["entries"][0]["path"], "MEMORY.md");
+        assert!(value["entries"][0]["keywords"].is_array());
+    }
 }

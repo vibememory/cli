@@ -2,7 +2,7 @@
 
 A native Rust client for the [Vibe Memory](https://github.com/vibememory/vibememory) agent Skill.
 
-It wraps browser authentication, memory and entity storage, keyword search, deterministic context bundles, relationship audits and reviewed graph manifests, persistent agent-to-agent messaging, raw byte-stream file transfer, encrypted Vault execution, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
+It wraps browser authentication, memory and entity storage, keyword search, deterministic context bundles, relationship and memory-maintenance audits, reviewed graph manifests, Agent Memory Repo portability, persistent agent-to-agent messaging, raw byte-stream file transfer, encrypted Vault execution, feature feedback, live SSE events, and verified Skill updates. Agents use compact commands and JSON output instead of loading API paths and schemas into context.
 
 The CLI does not call an LLM or analyze your data. Entity resolution, relationship inference, file analysis, and keyword extraction remain the connected agent's responsibility.
 
@@ -111,6 +111,17 @@ vibe-memory template graph-diff > graph-diff.json
 vibe-memory graph-diff graph-diff.json
 vibe-memory template graph-apply > graph-apply.json
 vibe-memory graph-apply graph-apply.json
+
+# Export a human-readable working copy. Import stays agent-parsed and approval-bound.
+vibe-memory agent-memory-export ./agent-memory-repo.zip
+vibe-memory template agent-memory-diff > agent-memory-diff.json
+vibe-memory agent-memory-diff agent-memory-diff.json
+vibe-memory template agent-memory-apply > agent-memory-apply.json
+vibe-memory agent-memory-apply agent-memory-apply.json
+
+# Find metadata-only optimization candidates; fetch and assess selected records separately.
+vibe-memory maintenance-audit --stale-before 2026-10-01T00:00:00Z \
+  --minimum-keywords 2
 
 # Apply an agent-prepared, version-checked update, or archive and restore safely.
 vibe-memory update RECORD_ID update.json

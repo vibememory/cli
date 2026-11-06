@@ -274,6 +274,31 @@ enum Command {
     GraphDiff { payload: PathBuf },
     /// Apply explicitly approved items from a graph diff JSON payload.
     GraphApply { payload: PathBuf },
+    /// Audit metadata-only memory maintenance candidates without returning record content.
+    MaintenanceAudit {
+        #[arg(long)]
+        stale_before: Option<String>,
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..=32))]
+        minimum_keywords: u8,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+        candidate_limit: u16,
+        #[arg(long)]
+        include_untrusted: bool,
+        #[arg(long)]
+        include_quarantined: bool,
+    },
+    /// Export a human-readable Agent Memory Repo ZIP projection.
+    AgentMemoryExport {
+        output: PathBuf,
+        #[arg(long)]
+        include_untrusted: bool,
+        #[arg(long)]
+        include_quarantined: bool,
+    },
+    /// Dry-run agent-prepared Agent Memory Repo entries from a JSON payload.
+    AgentMemoryDiff { payload: PathBuf },
+    /// Apply explicitly approved Agent Memory Repo entries from a JSON payload.
+    AgentMemoryApply { payload: PathBuf },
     /// List records.
     List {
         #[arg(long, value_parser = ["memory", "document", "entity", "file"])]
@@ -1360,12 +1385,16 @@ fn upload_file(path: &Path) -> Result<Value> {
 }
 
 fn download_file(id: &str, output: &Path) -> Result<Value> {
-    let credentials = connection()?;
     let endpoint = format!("/v1/files/{}", quote(id));
+    download_endpoint(&endpoint, output)
+}
+
+fn download_endpoint(endpoint: &str, output: &Path) -> Result<Value> {
+    let credentials = connection()?;
     let mut response = authenticated_request(
         &credentials,
         Method::GET,
-        &endpoint,
+        endpoint,
         Duration::from_secs(180),
     )?
     .send()?;
@@ -1643,6 +1672,43 @@ fn template(kind: &str) -> Value {
             "approved_create_client_ids": ["stable-edge-id"],
             "approved_retract_ids": [],
             "reason": "explicitly reviewed manifest"
+        }),
+        "agent-memory-diff" => json!({
+            "repository": "https://example.com/private/memory.git",
+            "revision": "commit SHA or version",
+            "entries": [{
+                "client_request_id": "stable-entry-id",
+                "content": "durable entry parsed by the connected agent",
+                "title": "optional title",
+                "kind": "fact",
+                "keywords": ["agent-supplied", "retrieval terms"],
+                "source": "MEMORY.md",
+                "tags": [],
+                "path": "MEMORY.md",
+                "line": 1,
+                "added_at": "2026-11-06T00:00:00Z",
+                "links": []
+            }]
+        }),
+        "agent-memory-apply" => json!({
+            "repository": "https://example.com/private/memory.git",
+            "revision": "commit SHA or version",
+            "entries": [{
+                "client_request_id": "stable-entry-id",
+                "content": "durable entry parsed by the connected agent",
+                "title": "optional title",
+                "kind": "fact",
+                "keywords": ["agent-supplied", "retrieval terms"],
+                "source": "MEMORY.md",
+                "tags": [],
+                "path": "MEMORY.md",
+                "line": 1,
+                "added_at": "2026-11-06T00:00:00Z",
+                "links": []
+            }],
+            "approved_diff_hash": "hash returned by agent-memory-diff",
+            "approved_client_request_ids": ["stable-entry-id"],
+            "reason": "user reviewed and approved these exact entries"
         }),
         _ => json!({
             "title": "Feature title",
@@ -2624,6 +2690,43 @@ fn run() -> Result<()> {
         Command::GraphApply { payload } => {
             call(Method::POST, "/v1/graph/apply", Some(&file_json(&payload)?))?
         }
+        Command::MaintenanceAudit {
+            stale_before,
+            minimum_keywords,
+            candidate_limit,
+            include_untrusted,
+            include_quarantined,
+        } => call(
+            Method::POST,
+            "/v1/memory-maintenance/audit",
+            Some(&json!({
+                "stale_before": stale_before,
+                "minimum_keywords": minimum_keywords,
+                "candidate_limit": candidate_limit,
+                "include_untrusted": include_untrusted,
+                "include_quarantined": include_quarantined
+            })),
+        )?,
+        Command::AgentMemoryExport {
+            output,
+            include_untrusted,
+            include_quarantined,
+        } => download_endpoint(
+            &format!(
+                "/v1/agent-memory-repo/export?include_untrusted={include_untrusted}&include_quarantined={include_quarantined}"
+            ),
+            &output,
+        )?,
+        Command::AgentMemoryDiff { payload } => call(
+            Method::POST,
+            "/v1/agent-memory-repo/diff",
+            Some(&file_json(&payload)?),
+        )?,
+        Command::AgentMemoryApply { payload } => call(
+            Method::POST,
+            "/v1/agent-memory-repo/apply",
+            Some(&file_json(&payload)?),
+        )?,
         Command::Vault { command } => match command {
             VaultCommand::List => call(Method::GET, "/v1/vault", None)?,
             VaultCommand::Capture {

@@ -45,6 +45,8 @@ Use command help for flags. The ordinary workflow is:
 - `relate SOURCE TARGET --relation NAME --reason EVIDENCE`
 - `keywords ID KEYWORD...` to replace an index
 - `relation-status ID --status active|retracted --reason TEXT --version N`
+- `maintenance-audit` for metadata-only optimization candidates; fetch selected records and apply only exact user-approved versioned changes
+- `agent-memory-export OUTPUT`, then agent-prepared `agent-memory-diff FILE` and explicitly approved `agent-memory-apply FILE` for Agent Memory Repo interoperability
 - `forget ID` only when deletion is authorized
 - `feedback`, `feedback-list`, `feedback-get`
 - `vault list`, `vault exec --env VARIABLE=ENTRY -- PROGRAM...`

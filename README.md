@@ -170,6 +170,8 @@ Output is compact JSON by default. Add global `--pretty` for human inspection. L
 ```sh
 vibe-memory COMMAND --help
 vibe-memory template memory
+vibe-memory template decision
+vibe-memory template checkpoint
 vibe-memory template entity
 vibe-memory template document
 vibe-memory template feedback

@@ -378,7 +378,7 @@ enum Command {
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
+        #[arg(value_parser = ["memory", "decision", "checkpoint", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.
@@ -1602,6 +1602,48 @@ fn template(kind: &str) -> Value {
             "source": "agent-session",
             "tags": [],
             "metadata": {"evidence": "user-stated"},
+            "provenance": {"source_type": "agent-authored"}
+        }),
+        "decision" => json!({
+            "content": "The option is under discussion and has not been accepted or rejected.",
+            "kind": "fact",
+            "keywords": ["project", "decision topic", "option"],
+            "source": "agent-session",
+            "tags": ["decision-profile"],
+            "metadata": {
+                "vibe_memory_profile": {
+                    "type": "decision",
+                    "version": 1,
+                    "state": "open",
+                    "topic": "decision topic",
+                    "option": "option under consideration",
+                    "applies_to": {"project": "project name", "scope": "specific scope"},
+                    "evidence": [],
+                    "reconsider_when": []
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
+        "checkpoint" => json!({
+            "content": "Implementation is reported complete locally; deployment remains unknown.",
+            "kind": "event",
+            "keywords": ["project", "session checkpoint", "implementation"],
+            "source": "agent-session",
+            "tags": ["session-checkpoint", "checkpoint-profile"],
+            "metadata": {
+                "vibe_memory_profile": {
+                    "type": "checkpoint",
+                    "version": 1,
+                    "claimed_stage": "implemented",
+                    "observation_kind": "author_reported",
+                    "target": {"project": "project name", "scope": "specific component", "environment": "local"},
+                    "observed_at": "2026-11-07T00:00:00Z",
+                    "environment_identity": "describe toolchain and environment",
+                    "reported_result": "what the author observed",
+                    "evidence": [],
+                    "remaining_unknowns": ["deployment not observed"]
+                }
+            },
             "provenance": {"source_type": "agent-authored"}
         }),
         "entity" => json!({
@@ -2962,6 +3004,14 @@ mod tests {
     fn templates_are_objects() {
         assert_eq!(template("entity")["entity_type"], "Person");
         assert!(template("document")["metadata"].is_object());
+        assert_eq!(
+            template("decision")["metadata"]["vibe_memory_profile"]["state"],
+            "open"
+        );
+        assert_eq!(
+            template("checkpoint")["metadata"]["vibe_memory_profile"]["observation_kind"],
+            "author_reported"
+        );
         assert_eq!(template("relation")["evidence_coverage"], "selected");
         assert_eq!(template("context-bundle")["include_content"], false);
         assert!(template("graph-diff")["items"].is_array());

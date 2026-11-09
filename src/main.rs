@@ -46,8 +46,12 @@ enum Command {
     Recall {
         #[arg(required = true)]
         keywords: Vec<String>,
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=100))]
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=50))]
         limit: u16,
+        #[arg(long, default_value = "minimal", value_parser = ["minimal", "standard"])]
+        projection: String,
+        #[arg(long, default_value_t = 16384, value_parser = clap::value_parser!(u32).range(1024..=1048576))]
+        byte_limit: u32,
         #[arg(long, default_value = "all", value_parser = ["all", "memories", "documents", "entities"])]
         scope: String,
         #[arg(long, default_value = "semantic", value_parser = ["semantic", "exact", "hybrid"])]
@@ -1867,7 +1871,8 @@ fn template(kind: &str) -> Value {
             "updated_after": null,
             "depth": 1,
             "limit": 50,
-            "byte_limit": 65536,
+            "byte_limit": 32768,
+            "projection": "minimal",
             "cursor": null,
             "include_content": false,
             "include_untrusted": false,
@@ -2488,6 +2493,8 @@ fn run() -> Result<()> {
         Command::Recall {
             keywords,
             limit,
+            projection,
+            byte_limit,
             scope,
             match_mode,
             min_score,
@@ -2505,6 +2512,8 @@ fn run() -> Result<()> {
             Some(&json!({
                 "keywords": keywords,
                 "limit": limit,
+                "projection": projection,
+                "byte_limit": byte_limit,
                 "scope": scope,
                 "match_mode": match_mode,
                 "min_score": min_score,
@@ -3362,6 +3371,8 @@ mod tests {
         );
         assert_eq!(template("relation")["evidence_coverage"], "selected");
         assert_eq!(template("context-bundle")["include_content"], false);
+        assert_eq!(template("context-bundle")["projection"], "minimal");
+        assert_eq!(template("context-bundle")["byte_limit"], 32768);
         assert!(template("graph-diff")["items"].is_array());
         assert!(template("graph-apply")["approved_create_client_ids"].is_array());
     }
@@ -3759,6 +3770,8 @@ mod tests {
         .unwrap();
         let Command::Recall {
             match_mode,
+            projection,
+            byte_limit,
             must_keywords,
             exclude_keywords,
             min_score,
@@ -3770,6 +3783,8 @@ mod tests {
             panic!("expected recall");
         };
         assert_eq!(match_mode, "hybrid");
+        assert_eq!(projection, "minimal");
+        assert_eq!(byte_limit, 16384);
         assert_eq!(must_keywords, ["active"]);
         assert_eq!(exclude_keywords, ["archived"]);
         assert_eq!(min_score, 0.6);

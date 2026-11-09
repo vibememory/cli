@@ -66,9 +66,11 @@ the connected agent decides what is durable and writes any checkpoint.
 
 ```sh
 # Search with keywords already extracted by the agent.
+# The default minimal projection is capped at 16 KiB; fetch selected IDs with get.
 vibe-memory recall project-name architecture
 vibe-memory recall project-name --match-mode hybrid --must-keyword active \
   --exclude-keyword archived --min-score 0.6
+vibe-memory recall project-name --projection standard --byte-limit 65536
 
 # Store an authorized durable outcome.
 vibe-memory remember "Use PostgreSQL for production" \

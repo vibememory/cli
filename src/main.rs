@@ -30,7 +30,7 @@ const MAX_DISTRIBUTION_BYTES: u64 = 1024 * 1024;
 #[command(
     name = "vibe-memory",
     version,
-    about = "Native CLI for agent-authored memory, rooms, messages, files, graph, Vault, feedback, and live events"
+    about = "Native CLI for agent-authored memory, audit logs, rooms, messages, files, graph, Vault, feedback, and live events"
 )]
 struct Cli {
     #[arg(long, global = true, help = "Indent JSON output (default is compact)")]
@@ -365,6 +365,11 @@ enum Command {
     },
     /// List addressable agents connected to this account.
     Agents,
+    /// Append and inspect this authenticated agent's operational audit logs.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
     /// Exchange persistent messages with other connected agents.
     Message {
         #[command(subcommand)]
@@ -377,7 +382,7 @@ enum Command {
     },
     /// Submit a fully prepared JSON object.
     FromJson {
-        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback"])]
+        #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback", "audit"])]
         kind: String,
         payload: PathBuf,
     },
@@ -517,6 +522,40 @@ enum MessageCommand {
         #[arg(long)]
         cursor_file: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuditCommand {
+    /// Append a sanitized operational result. Never include secrets or full transcripts.
+    Submit {
+        action: String,
+        summary: String,
+        #[arg(long, default_value = "success", value_parser = ["success", "failure", "denied", "skipped"])]
+        outcome: String,
+        #[arg(long, default_value = "")]
+        resource_type: String,
+        #[arg(long, default_value = "")]
+        resource_id: String,
+        #[arg(long, default_value = "{}", help = "Sanitized JSON object or @file")]
+        metadata: String,
+        #[arg(long)]
+        occurred_at: Option<String>,
+        #[arg(long = "retry-id", default_value = "")]
+        client_request_id: String,
+    },
+    /// List only audit logs belonging to this authenticated agent.
+    List {
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+        #[arg(long, default_value = "")]
+        action: String,
+        #[arg(long, value_parser = ["success", "failure", "denied", "skipped"])]
+        outcome: Option<String>,
+    },
+    /// Read one audit log belonging to this authenticated agent.
+    Get { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -2654,6 +2693,57 @@ fn run() -> Result<()> {
             )?
         }
         Command::Agents => call(Method::GET, "/v1/agents", None)?,
+        Command::Audit { command } => match command {
+            AuditCommand::Submit {
+                action,
+                summary,
+                outcome,
+                resource_type,
+                resource_id,
+                metadata,
+                occurred_at,
+                client_request_id,
+            } => call(
+                Method::POST,
+                "/v1/agent-audit-logs",
+                Some(&json!({
+                    "action": action,
+                    "summary": summary,
+                    "outcome": outcome,
+                    "resource_type": resource_type,
+                    "resource_id": resource_id,
+                    "metadata": json_object(&metadata)?,
+                    "occurred_at": occurred_at,
+                    "client_request_id": if client_request_id.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(client_request_id)
+                    }
+                })),
+            )?,
+            AuditCommand::List {
+                limit,
+                offset,
+                action,
+                outcome,
+            } => {
+                let mut endpoint = format!("/v1/agent-audit-logs?limit={limit}&offset={offset}");
+                if !action.is_empty() {
+                    endpoint.push_str("&action=");
+                    endpoint.push_str(&quote(&action));
+                }
+                if let Some(outcome) = outcome {
+                    endpoint.push_str("&outcome=");
+                    endpoint.push_str(&quote(&outcome));
+                }
+                call(Method::GET, &endpoint, None)?
+            }
+            AuditCommand::Get { id } => call(
+                Method::GET,
+                &format!("/v1/agent-audit-logs/{}", quote(&id)),
+                None,
+            )?,
+        },
         Command::Message { command } => match command {
             MessageCommand::Send {
                 recipient_agent_id,
@@ -2829,6 +2919,7 @@ fn run() -> Result<()> {
                 "entity" => "/v1/entities",
                 "document" => "/v1/documents",
                 "relation" => "/v1/relations",
+                "audit" => "/v1/agent-audit-logs",
                 _ => "/v1/feature-requests",
             };
             call(Method::POST, path, Some(&file_json(&payload)?))?

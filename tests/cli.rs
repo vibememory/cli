@@ -40,6 +40,7 @@ fn keeps_legacy_commands_out_of_help() {
     assert!(!stdout.contains("request-feature"));
     assert!(stdout.contains("maintenance-audit"));
     assert!(stdout.contains("agent-memory-export"));
+    assert!(stdout.contains("audit"));
 }
 
 #[test]

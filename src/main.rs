@@ -274,6 +274,17 @@ enum Command {
         #[arg(long)]
         include_quarantined: bool,
     },
+    /// Find Decision, Checkpoint, and relationship claims citing one exact evidence version.
+    EvidenceImpactCandidates {
+        evidence_record_id: String,
+        evidence_version: u64,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+        #[arg(long)]
+        include_untrusted: bool,
+        #[arg(long)]
+        include_quarantined: bool,
+    },
     /// Dry-run a desired-edge manifest from a JSON payload.
     GraphDiff { payload: PathBuf },
     /// Apply explicitly approved items from a graph diff JSON payload.
@@ -392,7 +403,7 @@ enum Command {
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "decision", "checkpoint", "failure-reproduction", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
+        #[arg(value_parser = ["memory", "decision", "checkpoint", "failure-reproduction", "evidence-impact-review", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.
@@ -1820,6 +1831,27 @@ fn template(kind: &str) -> Value {
             },
             "provenance": {"source_type": "agent-authored"}
         }),
+        "evidence-impact-review" => json!({
+            "content": "Reviewer observation for one exact evidence dependency.",
+            "kind": "event",
+            "keywords": ["project", "evidence impact", "target identifier"],
+            "source": "agent-session",
+            "tags": ["evidence-impact-review"],
+            "metadata": {
+                "vibe_memory_evidence_impact_review": {
+                    "type": "evidence_impact_review",
+                    "version": 1,
+                    "target": {"kind": "record", "id": "decision or checkpoint ID", "version": 1},
+                    "evidence": {"record_id": "evidence record ID", "version": 1},
+                    "reviewer": "authenticated agent or named reviewer",
+                    "observed_at": "2026-11-09T00:00:00Z",
+                    "impact": "unknown",
+                    "rationale": "what was observed without inferring missing dependencies",
+                    "follow_up": []
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
         "entity" => json!({
             "name": "Entity name",
             "entity_type": "Person",
@@ -3102,6 +3134,23 @@ fn run() -> Result<()> {
                 include_quarantined,
             )),
         )?,
+        Command::EvidenceImpactCandidates {
+            evidence_record_id,
+            evidence_version,
+            limit,
+            include_untrusted,
+            include_quarantined,
+        } => call(
+            Method::POST,
+            "/v1/evidence-impact/candidates",
+            Some(&json!({
+                "evidence_record_id": evidence_record_id,
+                "evidence_version": evidence_version,
+                "candidate_limit": limit,
+                "include_untrusted": include_untrusted,
+                "include_quarantined": include_quarantined
+            })),
+        )?,
         Command::GraphDiff { payload } => {
             call(Method::POST, "/v1/graph/diff", Some(&file_json(&payload)?))?
         }
@@ -3369,6 +3418,10 @@ mod tests {
                 ["input_rows"],
             2
         );
+        assert_eq!(
+            template("evidence-impact-review")["metadata"]["vibe_memory_evidence_impact_review"]["impact"],
+            "unknown"
+        );
         assert_eq!(template("relation")["evidence_coverage"], "selected");
         assert_eq!(template("context-bundle")["include_content"], false);
         assert_eq!(template("context-bundle")["projection"], "minimal");
@@ -3401,6 +3454,28 @@ mod tests {
         };
         assert_eq!(hub_threshold, 12);
         assert_eq!(relation, "WORKS_ON");
+
+        let evidence = Cli::try_parse_from([
+            "vibe-memory",
+            "evidence-impact-candidates",
+            "evidence-id",
+            "2",
+            "--limit",
+            "25",
+        ])
+        .unwrap();
+        let Command::EvidenceImpactCandidates {
+            evidence_record_id,
+            evidence_version,
+            limit,
+            ..
+        } = evidence.command
+        else {
+            panic!("expected evidence impact candidates");
+        };
+        assert_eq!(evidence_record_id, "evidence-id");
+        assert_eq!(evidence_version, 2);
+        assert_eq!(limit, 25);
 
         let default_audit = graph_audit_request_body(20, String::new(), false, false);
         assert_eq!(default_audit["relation"], "");

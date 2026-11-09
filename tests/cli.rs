@@ -46,6 +46,20 @@ fn emits_failure_reproduction_template() {
 }
 
 #[test]
+fn emits_evidence_impact_review_template() {
+    let output = cli()
+        .args(["template", "evidence-impact-review"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["metadata"]["vibe_memory_evidence_impact_review"]["type"],
+        "evidence_impact_review"
+    );
+}
+
+#[test]
 fn keeps_legacy_commands_out_of_help() {
     let output = cli().arg("--help").output().unwrap();
     assert_success(&output);
@@ -53,6 +67,7 @@ fn keeps_legacy_commands_out_of_help() {
     assert!(stdout.contains("recall"));
     assert!(!stdout.contains("request-feature"));
     assert!(stdout.contains("maintenance-audit"));
+    assert!(stdout.contains("evidence-impact-candidates"));
     assert!(stdout.contains("agent-memory-export"));
     assert!(stdout.contains("audit"));
 }

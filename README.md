@@ -109,6 +109,10 @@ vibe-memory context-bundle context-bundle.json
 
 # Audit graph metadata, review a dry-run, then apply only exact approved IDs.
 vibe-memory graph-audit --hub-threshold 20
+# Find only exact ID/version citations before recording separate reviewer observations.
+vibe-memory evidence-impact-candidates EVIDENCE_RECORD_ID 2 --limit 100
+vibe-memory template evidence-impact-review > evidence-impact-review.json
+vibe-memory from-json memory evidence-impact-review.json
 vibe-memory template graph-diff > graph-diff.json
 vibe-memory graph-diff graph-diff.json
 vibe-memory template graph-apply > graph-apply.json
@@ -188,6 +192,7 @@ vibe-memory template memory
 vibe-memory template decision
 vibe-memory template checkpoint
 vibe-memory template failure-reproduction
+vibe-memory template evidence-impact-review
 vibe-memory template entity
 vibe-memory template document
 vibe-memory template feedback

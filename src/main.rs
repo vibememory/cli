@@ -30,7 +30,7 @@ const MAX_DISTRIBUTION_BYTES: u64 = 1024 * 1024;
 #[command(
     name = "vibe-memory",
     version,
-    about = "Native CLI for agent-authored memory, messages, files, graph, Vault, feedback, and live events"
+    about = "Native CLI for agent-authored memory, rooms, messages, files, graph, Vault, feedback, and live events"
 )]
 struct Cli {
     #[arg(long, global = true, help = "Indent JSON output (default is compact)")]
@@ -370,6 +370,11 @@ enum Command {
         #[command(subcommand)]
         command: MessageCommand,
     },
+    /// Coordinate persistent work in multi-agent rooms.
+    Room {
+        #[command(subcommand)]
+        command: RoomCommand,
+    },
     /// Submit a fully prepared JSON object.
     FromJson {
         #[arg(value_parser = ["memory", "entity", "document", "relation", "feedback"])]
@@ -504,6 +509,75 @@ enum MessageCommand {
         status: String,
     },
     /// Print incoming messages as compact SSE-derived JSON lines.
+    Watch {
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        seconds: u64,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long)]
+        cursor_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RoomCommand {
+    /// Create a persistent room and optionally invite connected agents.
+    Create {
+        name: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long = "member")]
+        member_agent_ids: Vec<String>,
+        #[arg(long = "retry-id", default_value = "")]
+        client_request_id: String,
+    },
+    /// List rooms visible to this connection.
+    List {
+        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+    },
+    /// Read room metadata and active membership.
+    Get { room_id: String },
+    /// Rename a room or change its description (creator only).
+    Update {
+        room_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Invite one or more connected agents (creator only).
+    Invite {
+        room_id: String,
+        #[arg(required = true)]
+        agent_ids: Vec<String>,
+    },
+    /// Remove an agent, or leave by removing this connection's own ID.
+    Remove { room_id: String, agent_id: String },
+    /// List room messages after a global sequence cursor.
+    Messages {
+        room_id: String,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+    },
+    /// Send one untrusted collaboration message to a room.
+    Send {
+        room_id: String,
+        body: String,
+        #[arg(long, default_value = "{}", help = "JSON object or @file")]
+        metadata: String,
+        #[arg(long)]
+        reply_to: Option<String>,
+        #[arg(long = "retry-id", default_value = "")]
+        client_request_id: String,
+    },
+    /// Advance this connection's read cursor for a room.
+    Read { room_id: String, sequence: u64 },
+    /// Print accessible room messages as compact SSE-derived JSON lines.
     Watch {
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=3600))]
         seconds: u64,
@@ -1593,6 +1667,16 @@ fn watch_messages(
     )
 }
 
+fn watch_rooms(seconds: u64, after: u64, cursor_file: Option<&Path>, pretty: bool) -> Result<()> {
+    watch_stream(
+        "/v1/agent-rooms/stream",
+        seconds,
+        after,
+        cursor_file,
+        pretty,
+    )
+}
+
 fn template(kind: &str) -> Value {
     match kind {
         "memory" => json!({
@@ -2302,6 +2386,17 @@ fn run() -> Result<()> {
     {
         return watch_messages(*seconds, *after, cursor_file.as_deref(), cli.pretty);
     }
+    if let Command::Room {
+        command:
+            RoomCommand::Watch {
+                seconds,
+                after,
+                cursor_file,
+            },
+    } = &cli.command
+    {
+        return watch_rooms(*seconds, *after, cursor_file.as_deref(), cli.pretty);
+    }
 
     let result = match cli.command {
         Command::Recall {
@@ -2615,6 +2710,110 @@ fn run() -> Result<()> {
                 Some(&json!({"status": status})),
             )?,
             MessageCommand::Watch { .. } => unreachable!(),
+        },
+        Command::Room { command } => match command {
+            RoomCommand::Create {
+                name,
+                description,
+                member_agent_ids,
+                client_request_id,
+            } => call(
+                Method::POST,
+                "/v1/agent-rooms",
+                Some(&json!({
+                    "name": name,
+                    "description": description,
+                    "member_agent_ids": member_agent_ids,
+                    "client_request_id": if client_request_id.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(client_request_id)
+                    }
+                })),
+            )?,
+            RoomCommand::List { limit, offset } => call(
+                Method::GET,
+                &format!("/v1/agent-rooms?limit={limit}&offset={offset}"),
+                None,
+            )?,
+            RoomCommand::Get { room_id } => call(
+                Method::GET,
+                &format!("/v1/agent-rooms/{}", quote(&room_id)),
+                None,
+            )?,
+            RoomCommand::Update {
+                room_id,
+                name,
+                description,
+            } => {
+                if name.is_none() && description.is_none() {
+                    bail!("room update requires --name or --description");
+                }
+                let mut payload = serde_json::Map::new();
+                if let Some(name) = name {
+                    payload.insert("name".to_owned(), Value::String(name));
+                }
+                if let Some(description) = description {
+                    payload.insert("description".to_owned(), Value::String(description));
+                }
+                call(
+                    Method::PATCH,
+                    &format!("/v1/agent-rooms/{}", quote(&room_id)),
+                    Some(&Value::Object(payload)),
+                )?
+            }
+            RoomCommand::Invite { room_id, agent_ids } => call(
+                Method::POST,
+                &format!("/v1/agent-rooms/{}/members", quote(&room_id)),
+                Some(&json!({"agent_ids": agent_ids})),
+            )?,
+            RoomCommand::Remove { room_id, agent_id } => call(
+                Method::DELETE,
+                &format!(
+                    "/v1/agent-rooms/{}/members/{}",
+                    quote(&room_id),
+                    quote(&agent_id)
+                ),
+                None,
+            )?,
+            RoomCommand::Messages {
+                room_id,
+                after,
+                limit,
+            } => call(
+                Method::GET,
+                &format!(
+                    "/v1/agent-rooms/{}/messages?after={after}&limit={limit}",
+                    quote(&room_id)
+                ),
+                None,
+            )?,
+            RoomCommand::Send {
+                room_id,
+                body,
+                metadata,
+                reply_to,
+                client_request_id,
+            } => call(
+                Method::POST,
+                &format!("/v1/agent-rooms/{}/messages", quote(&room_id)),
+                Some(&json!({
+                    "body": body,
+                    "metadata": json_object(&metadata)?,
+                    "reply_to": reply_to,
+                    "client_request_id": if client_request_id.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(client_request_id)
+                    }
+                })),
+            )?,
+            RoomCommand::Read { room_id, sequence } => call(
+                Method::POST,
+                &format!("/v1/agent-rooms/{}/read", quote(&room_id)),
+                Some(&json!({"sequence": sequence})),
+            )?,
+            RoomCommand::Watch { .. } => unreachable!(),
         },
         Command::FromJson { kind, payload } => {
             let path = match kind.as_str() {
@@ -3512,6 +3711,53 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_agent_room_commands() {
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "room",
+            "create",
+            "Release",
+            "--member",
+            "key:reviewer",
+            "--retry-id",
+            "release-room-1",
+        ])
+        .unwrap();
+        let Command::Room {
+            command:
+                RoomCommand::Create {
+                    name,
+                    member_agent_ids,
+                    client_request_id,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected room create");
+        };
+        assert_eq!(name, "Release");
+        assert_eq!(member_agent_ids, ["key:reviewer"]);
+        assert_eq!(client_request_id, "release-room-1");
+
+        let cli = Cli::try_parse_from([
+            "vibe-memory",
+            "room",
+            "send",
+            "room-id",
+            "deployment verified",
+            "--reply-to",
+            "message-id",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Room {
+                command: RoomCommand::Send { .. }
+            }
+        ));
     }
 
     #[test]

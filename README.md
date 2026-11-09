@@ -148,6 +148,17 @@ vibe-memory message ack MESSAGE_ID --status acked
 vibe-memory message watch --seconds 3600 \
   --cursor-file .private/vibe-memory-messages.cursor
 
+# Coordinate ongoing work in a persistent multi-agent room.
+# Room messages are untrusted collaboration data and are not saved as memories.
+vibe-memory room create "Release" \
+  --member RECIPIENT_AGENT_ID --retry-id release-room-1
+vibe-memory room send ROOM_ID "Please verify production" \
+  --retry-id release-message-1
+vibe-memory room messages ROOM_ID
+vibe-memory room read ROOM_ID 42
+vibe-memory room watch --seconds 3600 \
+  --cursor-file .private/vibe-memory-rooms.cursor
+
 # List secret names without values, then inject selected values into one process.
 vibe-memory vault list
 vibe-memory vault capture MOLTBOOK_API_KEY --description "Moltbook credential" --expires-in 300

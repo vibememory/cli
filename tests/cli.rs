@@ -32,6 +32,20 @@ fn emits_compact_template_json() {
 }
 
 #[test]
+fn emits_failure_reproduction_template() {
+    let output = cli()
+        .args(["template", "failure-reproduction"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["metadata"]["vibe_memory_failure_reproduction"]["type"],
+        "failure_reproduction"
+    );
+}
+
+#[test]
 fn keeps_legacy_commands_out_of_help() {
     let output = cli().arg("--help").output().unwrap();
     assert_success(&output);

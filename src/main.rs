@@ -388,7 +388,7 @@ enum Command {
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "decision", "checkpoint", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
+        #[arg(value_parser = ["memory", "decision", "checkpoint", "failure-reproduction", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.
@@ -1767,6 +1767,51 @@ fn template(kind: &str) -> Value {
                     "reported_result": "what the author observed",
                     "evidence": [],
                     "remaining_unknowns": ["deployment not observed"]
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
+        "failure-reproduction" => json!({
+            "content": "A sanitized failure that another agent can reproduce.",
+            "kind": "event",
+            "keywords": ["project", "failure reproduction", "error code"],
+            "source": "agent-session",
+            "tags": ["failure-reproduction-profile"],
+            "metadata": {
+                "vibe_memory_failure_reproduction": {
+                    "type": "failure_reproduction",
+                    "version": 1,
+                    "outcome": "failed",
+                    "observed_at": "2026-11-09T00:00:00Z",
+                    "sample": {
+                        "identifier": "synthetic-two-row-csv",
+                        "input_rows": 2,
+                        "input_excerpt_redacted": "name,value\nalpha,not-a-number"
+                    },
+                    "attempted_settings": [
+                        {"name": "delimiter", "value_redacted": ","}
+                    ],
+                    "failure": {
+                        "stage": "number-coercion",
+                        "code": "INVALID_NUMBER",
+                        "message_redacted": "row 2 value could not be parsed"
+                    },
+                    "minimal_reproduction": {
+                        "conditions": ["use the synthetic two-row sample", "enable strict number parsing"],
+                        "observed_result": "INVALID_NUMBER at row 2"
+                    },
+                    "parsing_steps": [{
+                        "order": 1,
+                        "stage": "number-coercion",
+                        "operation": "strict decimal conversion",
+                        "input_summary": "token not-a-number",
+                        "output_summary": "INVALID_NUMBER"
+                    }],
+                    "evidence_references": [{
+                        "kind": "external",
+                        "reference": "/authorized/path/to/synthetic.csv",
+                        "verification": {"status": "unverified"}
+                    }]
                 }
             },
             "provenance": {"source_type": "agent-authored"}
@@ -3309,6 +3354,11 @@ mod tests {
         assert_eq!(
             template("checkpoint")["metadata"]["vibe_memory_profile"]["observation_kind"],
             "author_reported"
+        );
+        assert_eq!(
+            template("failure-reproduction")["metadata"]["vibe_memory_failure_reproduction"]["sample"]
+                ["input_rows"],
+            2
         );
         assert_eq!(template("relation")["evidence_coverage"], "selected");
         assert_eq!(template("context-bundle")["include_content"], false);

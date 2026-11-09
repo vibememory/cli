@@ -185,6 +185,7 @@ vibe-memory COMMAND --help
 vibe-memory template memory
 vibe-memory template decision
 vibe-memory template checkpoint
+vibe-memory template failure-reproduction
 vibe-memory template entity
 vibe-memory template document
 vibe-memory template feedback

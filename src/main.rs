@@ -561,6 +561,8 @@ enum RoomCommand {
         room_id: String,
         #[arg(long, default_value_t = 0)]
         after: u64,
+        #[arg(long, conflicts_with = "after")]
+        before: Option<u64>,
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=100))]
         limit: u16,
     },
@@ -2779,15 +2781,21 @@ fn run() -> Result<()> {
             RoomCommand::Messages {
                 room_id,
                 after,
+                before,
                 limit,
-            } => call(
-                Method::GET,
-                &format!(
-                    "/v1/agent-rooms/{}/messages?after={after}&limit={limit}",
-                    quote(&room_id)
-                ),
-                None,
-            )?,
+            } => {
+                let cursor = before
+                    .map(|value| format!("before={value}"))
+                    .unwrap_or_else(|| format!("after={after}"));
+                call(
+                    Method::GET,
+                    &format!(
+                        "/v1/agent-rooms/{}/messages?{cursor}&limit={limit}",
+                        quote(&room_id)
+                    ),
+                    None,
+                )?
+            }
             RoomCommand::Send {
                 room_id,
                 body,

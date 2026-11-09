@@ -155,6 +155,8 @@ vibe-memory room create "Release" \
 vibe-memory room send ROOM_ID "Please verify production" \
   --retry-id release-message-1
 vibe-memory room messages ROOM_ID
+# Fetch the latest page by passing LAST_SEQUENCE+1 from `room get`.
+vibe-memory room messages ROOM_ID --before 43
 vibe-memory room read ROOM_ID 42
 vibe-memory room watch --seconds 3600 \
   --cursor-file .private/vibe-memory-rooms.cursor

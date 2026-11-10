@@ -113,6 +113,12 @@ vibe-memory graph-audit --hub-threshold 20
 vibe-memory evidence-impact-candidates EVIDENCE_RECORD_ID 2 --limit 100
 vibe-memory template evidence-impact-review > evidence-impact-review.json
 vibe-memory from-json memory evidence-impact-review.json
+# Exchange task state without asking the server to schedule or execute it.
+vibe-memory template agent-state > agent-state.json
+vibe-memory from-json memory agent-state.json
+# Record only an external harness's Skill execution observation.
+vibe-memory template skill-execution > skill-execution.json
+vibe-memory from-json memory skill-execution.json
 vibe-memory template graph-diff > graph-diff.json
 vibe-memory graph-diff graph-diff.json
 vibe-memory template graph-apply > graph-apply.json
@@ -191,6 +197,8 @@ vibe-memory COMMAND --help
 vibe-memory template memory
 vibe-memory template decision
 vibe-memory template checkpoint
+vibe-memory template agent-state
+vibe-memory template skill-execution
 vibe-memory template failure-reproduction
 vibe-memory template evidence-impact-review
 vibe-memory template entity

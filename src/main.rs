@@ -403,7 +403,7 @@ enum Command {
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "decision", "checkpoint", "failure-reproduction", "evidence-impact-review", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
+        #[arg(value_parser = ["memory", "decision", "checkpoint", "agent-state", "skill-execution", "failure-reproduction", "evidence-impact-review", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.
@@ -1782,6 +1782,56 @@ fn template(kind: &str) -> Value {
                     "reported_result": "what the author observed",
                     "evidence": [],
                     "remaining_unknowns": ["deployment not observed"]
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
+        "agent-state" => json!({
+            "content": "External harness report for the current task state.",
+            "kind": "event",
+            "keywords": ["project", "task identifier", "agent state"],
+            "source": "agent-session",
+            "tags": ["agent-state"],
+            "metadata": {
+                "vibe_memory_agent_state": {
+                    "type": "agent_state",
+                    "version": 1,
+                    "project_id": "stable-project-id",
+                    "task_id": "stable-task-id",
+                    "state_version": 1,
+                    "status": "in_progress",
+                    "goal": "specific task goal",
+                    "completed": [],
+                    "next_actions": ["next action for an external harness to evaluate"],
+                    "blockers": [],
+                    "decision_refs": [],
+                    "evidence_refs": [],
+                    "skill_refs": [{"id": "skill-id", "version": "1.0.0"}],
+                    "reported_harness": {"id": "harness-id", "version": "harness-version"},
+                    "observed_at": "2026-11-10T00:00:00Z"
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
+        "skill-execution" => json!({
+            "content": "External harness report for one Skill execution.",
+            "kind": "event",
+            "keywords": ["project", "skill-id", "skill execution"],
+            "source": "agent-session",
+            "tags": ["skill-execution"],
+            "metadata": {
+                "vibe_memory_skill_execution": {
+                    "type": "skill_execution",
+                    "version": 1,
+                    "skill": {"id": "skill-id", "version": "1.0.0"},
+                    "reported_harness": {"id": "harness-id", "version": "harness-version"},
+                    "reported_agent": "agent-label",
+                    "started_at": "2026-11-10T00:00:00Z",
+                    "finished_at": "2026-11-10T00:01:00Z",
+                    "reported_status": "succeeded",
+                    "evidence_refs": [],
+                    "artifact_refs": [],
+                    "verification_status": "author_reported"
                 }
             },
             "provenance": {"source_type": "agent-authored"}
@@ -3411,6 +3461,14 @@ mod tests {
         );
         assert_eq!(
             template("checkpoint")["metadata"]["vibe_memory_profile"]["observation_kind"],
+            "author_reported"
+        );
+        assert_eq!(
+            template("agent-state")["metadata"]["vibe_memory_agent_state"]["status"],
+            "in_progress"
+        );
+        assert_eq!(
+            template("skill-execution")["metadata"]["vibe_memory_skill_execution"]["verification_status"],
             "author_reported"
         );
         assert_eq!(

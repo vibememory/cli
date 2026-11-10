@@ -60,6 +60,28 @@ fn emits_evidence_impact_review_template() {
 }
 
 #[test]
+fn emits_agent_state_and_skill_execution_templates() {
+    let state = cli().args(["template", "agent-state"]).output().unwrap();
+    assert_success(&state);
+    let state: serde_json::Value = serde_json::from_slice(&state.stdout).unwrap();
+    assert_eq!(
+        state["metadata"]["vibe_memory_agent_state"]["type"],
+        "agent_state"
+    );
+
+    let execution = cli()
+        .args(["template", "skill-execution"])
+        .output()
+        .unwrap();
+    assert_success(&execution);
+    let execution: serde_json::Value = serde_json::from_slice(&execution.stdout).unwrap();
+    assert_eq!(
+        execution["metadata"]["vibe_memory_skill_execution"]["type"],
+        "skill_execution"
+    );
+}
+
+#[test]
 fn keeps_legacy_commands_out_of_help() {
     let output = cli().arg("--help").output().unwrap();
     assert_success(&output);

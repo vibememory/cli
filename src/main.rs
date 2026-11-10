@@ -285,6 +285,17 @@ enum Command {
         #[arg(long)]
         include_quarantined: bool,
     },
+    /// Find same-task Agent State observations without selecting or merging truth.
+    StateReconciliationCandidates {
+        project_id: String,
+        task_id: String,
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(2..=500))]
+        limit: u16,
+        #[arg(long)]
+        include_untrusted: bool,
+        #[arg(long)]
+        include_quarantined: bool,
+    },
     /// Dry-run a desired-edge manifest from a JSON payload.
     GraphDiff { payload: PathBuf },
     /// Apply explicitly approved items from a graph diff JSON payload.
@@ -309,6 +320,12 @@ enum Command {
         include_untrusted: bool,
         #[arg(long)]
         include_quarantined: bool,
+    },
+    /// Export a full or record-selected portable Agent Context Package ZIP.
+    PortableExport {
+        output: PathBuf,
+        #[arg(long = "record-id", value_name = "ID")]
+        record_ids: Vec<String>,
     },
     /// Dry-run agent-prepared Agent Memory Repo entries from a JSON payload.
     AgentMemoryDiff { payload: PathBuf },
@@ -403,7 +420,7 @@ enum Command {
     },
     /// Print a compact payload template.
     Template {
-        #[arg(value_parser = ["memory", "decision", "checkpoint", "agent-state", "skill-execution", "failure-reproduction", "evidence-impact-review", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
+        #[arg(value_parser = ["memory", "decision", "checkpoint", "agent-state", "skill-execution", "state-reconciliation", "capability-manifest", "context-lifecycle", "failure-reproduction", "evidence-impact-review", "entity", "document", "relation", "feedback", "context-bundle", "graph-diff", "graph-apply", "agent-memory-diff", "agent-memory-apply"])]
         kind: String,
     },
     /// Print live changes as compact JSON lines.
@@ -1836,6 +1853,68 @@ fn template(kind: &str) -> Value {
             },
             "provenance": {"source_type": "agent-authored"}
         }),
+        "state-reconciliation" => json!({
+            "content": "External resolution of competing Agent State observations.",
+            "kind": "event",
+            "keywords": ["project", "task identifier", "state reconciliation"],
+            "source": "agent-session",
+            "tags": ["state-reconciliation"],
+            "metadata": {
+                "vibe_memory_state_reconciliation": {
+                    "type": "state_reconciliation",
+                    "version": 1,
+                    "project_id": "stable-project-id",
+                    "task_id": "stable-task-id",
+                    "status": "open",
+                    "candidate_refs": [
+                        {"record_id": "first-state-record", "version": 1},
+                        {"record_id": "second-state-record", "version": 1}
+                    ],
+                    "observed_at": "2026-11-10T00:00:00Z"
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
+        "capability-manifest" => json!({
+            "content": "External agent capability declaration; not an effective permission grant.",
+            "kind": "fact",
+            "keywords": ["agent identifier", "harness", "capability manifest"],
+            "source": "agent-session",
+            "tags": ["agent-capability-manifest"],
+            "metadata": {
+                "vibe_memory_agent_capability_manifest": {
+                    "type": "agent_capability_manifest",
+                    "version": 1,
+                    "manifest_version": 1,
+                    "agent_id": "stable-agent-id",
+                    "harness": {"id": "harness-id", "version": "harness-version"},
+                    "capabilities": ["code_edit", "test_execution"],
+                    "skill_refs": [{"id": "skill-id", "version": "1.0.0"}],
+                    "supported_task_types": ["software_change"],
+                    "required_permissions": ["memory:read", "memory:write"],
+                    "observed_at": "2026-11-10T00:00:00Z"
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
+        "context-lifecycle" => json!({
+            "content": "Declarative lifecycle policy; it does not delete or grant access.",
+            "kind": "fact",
+            "keywords": ["project", "context lifecycle", "retention"],
+            "source": "agent-session",
+            "tags": ["context-lifecycle"],
+            "metadata": {
+                "vibe_memory_context_lifecycle": {
+                    "type": "context_lifecycle",
+                    "version": 1,
+                    "context_class": "project",
+                    "retention": "indefinite",
+                    "context_bundle_policy": "include",
+                    "observed_at": "2026-11-10T00:00:00Z"
+                }
+            },
+            "provenance": {"source_type": "agent-authored"}
+        }),
         "failure-reproduction" => json!({
             "content": "A sanitized failure that another agent can reproduce.",
             "kind": "event",
@@ -3201,6 +3280,23 @@ fn run() -> Result<()> {
                 "include_quarantined": include_quarantined
             })),
         )?,
+        Command::StateReconciliationCandidates {
+            project_id,
+            task_id,
+            limit,
+            include_untrusted,
+            include_quarantined,
+        } => call(
+            Method::POST,
+            "/v1/agent-states/reconciliation/candidates",
+            Some(&json!({
+                "project_id": project_id,
+                "task_id": task_id,
+                "candidate_limit": limit,
+                "include_untrusted": include_untrusted,
+                "include_quarantined": include_quarantined
+            })),
+        )?,
         Command::GraphDiff { payload } => {
             call(Method::POST, "/v1/graph/diff", Some(&file_json(&payload)?))?
         }
@@ -3234,6 +3330,19 @@ fn run() -> Result<()> {
             ),
             &output,
         )?,
+        Command::PortableExport { output, record_ids } => {
+            let query = record_ids
+                .iter()
+                .map(|record_id| format!("record_id={}", quote(record_id)))
+                .collect::<Vec<_>>()
+                .join("&");
+            let endpoint = if query.is_empty() {
+                "/v1/portable-archive".to_owned()
+            } else {
+                format!("/v1/portable-archive?{query}")
+            };
+            download_endpoint(&endpoint, &output)?
+        }
         Command::AgentMemoryDiff { payload } => call(
             Method::POST,
             "/v1/agent-memory-repo/diff",
@@ -3472,6 +3581,19 @@ mod tests {
             "author_reported"
         );
         assert_eq!(
+            template("state-reconciliation")["metadata"]["vibe_memory_state_reconciliation"]["status"],
+            "open"
+        );
+        assert_eq!(
+            template("capability-manifest")["metadata"]["vibe_memory_agent_capability_manifest"]["capabilities"]
+                [0],
+            "code_edit"
+        );
+        assert_eq!(
+            template("context-lifecycle")["metadata"]["vibe_memory_context_lifecycle"]["context_bundle_policy"],
+            "include"
+        );
+        assert_eq!(
             template("failure-reproduction")["metadata"]["vibe_memory_failure_reproduction"]["sample"]
                 ["input_rows"],
             2
@@ -3534,6 +3656,28 @@ mod tests {
         assert_eq!(evidence_record_id, "evidence-id");
         assert_eq!(evidence_version, 2);
         assert_eq!(limit, 25);
+
+        let reconciliation = Cli::try_parse_from([
+            "vibe-memory",
+            "state-reconciliation-candidates",
+            "visionflow",
+            "inspection-node",
+            "--limit",
+            "20",
+        ])
+        .unwrap();
+        let Command::StateReconciliationCandidates {
+            project_id,
+            task_id,
+            limit,
+            ..
+        } = reconciliation.command
+        else {
+            panic!("expected state reconciliation candidates");
+        };
+        assert_eq!(project_id, "visionflow");
+        assert_eq!(task_id, "inspection-node");
+        assert_eq!(limit, 20);
 
         let default_audit = graph_audit_request_body(20, String::new(), false, false);
         assert_eq!(default_audit["relation"], "");

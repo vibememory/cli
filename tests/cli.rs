@@ -82,6 +82,41 @@ fn emits_agent_state_and_skill_execution_templates() {
 }
 
 #[test]
+fn emits_followup_interoperability_templates() {
+    for (kind, metadata_key, profile_type) in [
+        (
+            "state-reconciliation",
+            "vibe_memory_state_reconciliation",
+            "state_reconciliation",
+        ),
+        (
+            "capability-manifest",
+            "vibe_memory_agent_capability_manifest",
+            "agent_capability_manifest",
+        ),
+        (
+            "context-lifecycle",
+            "vibe_memory_context_lifecycle",
+            "context_lifecycle",
+        ),
+    ] {
+        let output = cli().args(["template", kind]).output().unwrap();
+        assert_success(&output);
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["metadata"][metadata_key]["type"], profile_type);
+    }
+}
+
+#[test]
+fn exposes_state_reconciliation_and_portable_export_commands() {
+    let output = cli().arg("--help").output().unwrap();
+    assert_success(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("state-reconciliation-candidates"));
+    assert!(stdout.contains("portable-export"));
+}
+
+#[test]
 fn keeps_legacy_commands_out_of_help() {
     let output = cli().arg("--help").output().unwrap();
     assert_success(&output);

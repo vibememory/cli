@@ -119,6 +119,15 @@ vibe-memory from-json memory agent-state.json
 # Record only an external harness's Skill execution observation.
 vibe-memory template skill-execution > skill-execution.json
 vibe-memory from-json memory skill-execution.json
+# Inspect same-task state coordinates, then record an external resolution if needed.
+vibe-memory state-reconciliation-candidates PROJECT_ID TASK_ID
+vibe-memory template state-reconciliation > state-reconciliation.json
+vibe-memory from-json memory state-reconciliation.json
+# Declare capabilities and context lifetime without granting permissions or executing work.
+vibe-memory template capability-manifest > capability-manifest.json
+vibe-memory template context-lifecycle > context-lifecycle.json
+# Export a permission-scoped partial Agent Context Package.
+vibe-memory portable-export context.zip --record-id STATE_ID --record-id EVIDENCE_ID
 vibe-memory template graph-diff > graph-diff.json
 vibe-memory graph-diff graph-diff.json
 vibe-memory template graph-apply > graph-apply.json
@@ -199,6 +208,9 @@ vibe-memory template decision
 vibe-memory template checkpoint
 vibe-memory template agent-state
 vibe-memory template skill-execution
+vibe-memory template state-reconciliation
+vibe-memory template capability-manifest
+vibe-memory template context-lifecycle
 vibe-memory template failure-reproduction
 vibe-memory template evidence-impact-review
 vibe-memory template entity
